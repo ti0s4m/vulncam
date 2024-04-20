@@ -1,4 +1,4 @@
-# created by virtualenv automatically
+# gitignore for vulncam
 .venv
 .idea
 ti0s4m.ini
