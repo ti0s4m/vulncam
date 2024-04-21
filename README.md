@@ -1,5 +1,5 @@
 # vulncam
-## Script that search for exposed cams using [Shodan](https://www.shodan.io) and directly connects to them using [MPV](https://mpv.io).
+## Script that searches for exposed cams using [Shodan](https://www.shodan.io) and directly connects to them using [MPV](https://mpv.io).
 ### In the config file you need to specify the Shodan API Key and the MPV path at least.
 #### Quick Help:
 ```bazaar
