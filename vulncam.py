@@ -15,6 +15,7 @@ DEFAULT_QUERY = 'RTSP has_screenshot:yes'
 DEFAULT_PAGES = 1
 RESULTS_PER_PAGE = 100
 DEFAULT_MAX_PROCS = 10
+DEFAULT_TIMEOUT = 15
 MAX_PAGES = 100
 GEO_TIMEOUT = 10
 IP_API = 'http://ip-api.com/json/%s'
@@ -25,7 +26,16 @@ OPTIONAL_SECTION = 'OPTIONAL'
 OPTIONAL_PARAMS = ('ipgeoapikey',)
 RC_SIGINT = 1
 RC_WRONG_CONFIG = 2
+MAX_WORKING = 5
+LINUX_SOFTWARE = ['mpv', 'wmctrl']
 
+
+def debug(msg):
+    """
+    Prints a message if verbose is enabled.
+    """
+    if verbose:
+        print(msg)
 
 def check_config():
     """
@@ -60,8 +70,9 @@ def sigint_handler(signum, frame):
     signal_received = True
     print('\nKilling active processes...')
     for pid in list(processes):
-        processes[pid].kill()
-        processes.pop(pid)
+        if not leave_windows or not processes[pid]['working']:
+            processes[pid]['process'].kill()
+            processes.pop(pid)
     sys.exit(RC_SIGINT)
 
 
@@ -87,7 +98,6 @@ def query_shodan_pages(query, pages):
             shuffle(page_list)
         for p in range(min(pages, total_pages)):
             next_page = page_list.pop(0)
-            # print ('Página %d' % next_page)
             q = api.search(query, page=next_page)
             for result in q['matches']:
                 results.append((result['ip_str'], result['port']))
@@ -134,7 +144,7 @@ def active_processes():
             p = psutil.Process(pid)
             if p.name() == process_name:
                 if p.status() == psutil.STATUS_ZOMBIE:
-                    processes[pid].kill()
+                    processes[pid]['process'].kill()
                     del processes[pid]
                 else:
                     cnt += 1
@@ -144,6 +154,10 @@ def active_processes():
 
 
 def get_geo_info(match_ip):
+    """
+    It checks geographical information about a given IP.
+    :return: Country, region and city
+    """
     try:
         r = requests.get(IP_API % match_ip, timeout=GEO_TIMEOUT)
         j = r.json()
@@ -168,6 +182,55 @@ def get_geo_info(match_ip):
         city = j['city']
     return country, region, city
 
+def get_current_windows():
+    """
+    List the current windows on the system.
+    :return: List of titles of the windows running on the system.
+    """
+    current_windows = []
+    result = subprocess.run(['wmctrl', '-l'], stdout=subprocess.PIPE).stdout.decode('utf-8')
+    windows = result.strip().split('\n')
+    for window in windows:
+        parts = window.split()
+        current_windows.append(" ".join(parts[3:]).replace('"', ''))
+    return current_windows
+
+
+def check_working():
+    """
+    It checks if the RTSP stream is working by checking if the window of MPV is on the screen.
+    It also kills processes that are not working after a timeout.
+    :return: Number of RTSP streams working.
+    """
+    if sys.platform != 'linux':
+        return 0
+    current_windows = get_current_windows()
+    now = time.time()
+    cnt_working = 0
+    for pid in list(processes):
+        if processes[pid]['title'] in current_windows:
+            if not processes[pid]['working']:
+                debug(f'{processes[pid]['title']} is working :)')
+            processes[pid]['working'] = True
+            cnt_working += 1
+        elif (now - processes[pid]['launch_time']) >= DEFAULT_TIMEOUT:
+            debug(f'Killing {processes[pid]['title']} as it is not working.')
+            processes[pid]['process'].kill()
+            processes.pop(pid)
+    return cnt_working
+
+def check_linux_software():
+    """
+    It checks of all required software in linux is installed.
+    :return: True if everything is installed False otherwise.
+    """
+    for software in LINUX_SOFTWARE:
+        if subprocess.call(['which', software], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT) != 0:
+            print(f'{software} is not installed.')
+            return False
+    debug('All required software is present.')
+    return True
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='RTSP Stream manager using Shodan.',
@@ -187,6 +250,10 @@ if __name__ == '__main__':
                         action='store_true')
     parser.add_argument('-m', '--max-processes', type=int, help='Max parallel processes',
                         default=DEFAULT_MAX_PROCS)
+    parser.add_argument('-w', '--max-windows', type=int, help='Max parallel stream windows',
+                        default=DEFAULT_MAX_PROCS)
+    parser.add_argument('-l', '--leave-windows', help='Leave working stream windows when finish.',
+                        action='store_true')
     parser.add_argument('-v', '--verbose', help='Verbose outputs', action='store_true')
     args = parser.parse_args()
     config = configparser.ConfigParser()
@@ -201,7 +268,12 @@ if __name__ == '__main__':
     total_results = args.total_results
     stream_record = args.stream_record
     max_processes = args.max_processes
+    max_windows = args.max_windows
+    leave_windows = args.leave_windows
     verbose = args.verbose
+    if sys.platform == 'linux':
+        if not check_linux_software():
+            sys.exit(1)
     processes = {}
     signal.signal(signal.SIGINT, sigint_handler)
     signal_received = False
@@ -222,8 +294,8 @@ if __name__ == '__main__':
     if len(vulncam_matches) > 0:
         for idx, vulncam_match in enumerate(vulncam_matches):
             while signal_received or (active_processes() >= max_processes):
-                if verbose:
-                    print('Waiting for some process to finish...')
+                check_working()
+                debug('Waiting for some process to finish...')
                 time.sleep(1)
                 if signal_received:
                     sigint_handler(None, None)
@@ -233,12 +305,22 @@ if __name__ == '__main__':
             if stream_record:
                 mkv_file = '%d.mkv' % (idx + 1)
                 cmd = (config[REQUIRED_SECTION]['MPVFilePath'], '--title="%s"' % title, '--stream-record=%s' % mkv_file,
-                       'rtsp://%s:%d' % vulncam_match, '--mute=yes')
+                       'rtsp://%s:%d' % vulncam_match, '--mute=yes', '--gpu-context=x11egl')
             else:
                 cmd = (config[REQUIRED_SECTION]['MPVFilePath'], '--title="%s"' % title, 'rtsp://%s:%d' % vulncam_match,
-                       '--mute=yes')
+                       '--mute=yes', '--gpu-context=x11egl')
             mpv_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-            processes[mpv_process.pid] = mpv_process
+            processes[mpv_process.pid] = {'process': mpv_process, 'title': title, 'launch_time': time.time(),
+                                          'working': False}
             time.sleep(0.2)
-        while active_processes() > 0:
-            time.sleep(1)
+            while check_working() >= max_windows:
+                debug('Max windows limit reached. Not launching more connections until a window is closed...')
+                time.sleep(1)
+        if leave_windows:
+            while active_processes() > check_working():
+                time.sleep(1)
+        else:
+            while active_processes() > 0:
+                check_working()
+                time.sleep(1)
+

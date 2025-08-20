@@ -17,6 +17,8 @@ options:
   -t, --total-results                               All results are requested from Shodan (default: False)
   -s, --stream-record                               Records the streams in mkv files (default: False)
   -m MAX_PROCESSES, --max-processes MAX_PROCESSES   Max parallel processes (default: 10)
+  -w MAX_WINDOWS, --max-windows MAX_WINDOWS         Max parallel stream windows (default: 10)
+  -l, --leave-windows                               Leave working stream windows when finish. (default: False)
   -v, --verbose                                     Verbose outputs (default: False)
 
 ```
