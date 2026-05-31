@@ -261,12 +261,14 @@ class VulnCam:
         mpv_path = self.config[REQUIRED_SECTION]['mpvfilepath']
 
         for idx, match in enumerate(matches):
-            while self.signal_received or (self._active_processes() >= self.max_processes):
+            if self.signal_received:
+                break
+            while not self.signal_received and self._active_processes() >= self.max_processes:
                 self._check_working()
                 logger.debug('Waiting for some process to finish...')
                 time.sleep(1)
-                if self.signal_received:
-                    self._sigint_handler(None, None)
+            if self.signal_received:
+                break
 
             location = self._get_geo_info(match[0])
             title = '[%d] %s:%d (%s-%s-%s)' % tuple((idx + 1,) + match + location)
@@ -275,11 +277,12 @@ class VulnCam:
             if self.stream_record:
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 mkv_file = '%s_%d.mkv' % (ts, idx + 1)
-                cmd = (mpv_path, '--title="%s"' % title, '--stream-record=%s' % mkv_file,
-                       'rtsp://%s:%d' % match, '--mute=yes', '--gpu-context=x11egl')
+                cmd = [mpv_path, '--title=%s' % title, '--stream-record=%s' % mkv_file,
+                       'rtsp://%s:%d' % match, '--mute=yes']
             else:
-                cmd = (mpv_path, '--title="%s"' % title, 'rtsp://%s:%d' % match,
-                       '--mute=yes', '--gpu-context=x11egl')
+                cmd = [mpv_path, '--title=%s' % title, 'rtsp://%s:%d' % match, '--mute=yes']
+            if sys.platform == 'linux':
+                cmd.append('--gpu-context=x11egl')
 
             mpv_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
             self.processes[mpv_process.pid] = {
@@ -290,10 +293,12 @@ class VulnCam:
             }
             time.sleep(0.2)
 
-            while self._check_working() >= self.max_windows:
+            while not self.signal_received and self._check_working() >= self.max_windows:
                 logger.debug('Max windows limit reached. Not launching more connections until a window is closed...')
                 time.sleep(1)
 
+        if self.signal_received:
+            return
         if self.leave_windows:
             while self._active_processes() > self._check_working():
                 time.sleep(1)
