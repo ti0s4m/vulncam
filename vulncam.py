@@ -306,6 +306,7 @@ class VulnCam:
             while self._active_processes() > 0:
                 self._check_working()
                 time.sleep(1)
+            self._check_working()  # final sweep: catch exits during last sleep
 
 
 if __name__ == '__main__':

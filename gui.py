@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import glob
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -19,7 +21,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QFileDialog, QMessageBox, QSizePolicy, QComboBox,
     QSplitter, QListWidget, QListWidgetItem,
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
 from PyQt6.QtGui import QFont, QTextCursor, QColor, QIcon, QPixmap
 
 from vulncam import (
@@ -76,6 +78,10 @@ TRANSLATIONS = {
         'dlg_select_config':  'Select config file',
         'dlg_select_mpv':     'Select MPV',
         'ini_filter':         'INI files (*.ini)',
+        'btn_detect_mpv':     'Detect',
+        'log_mpv_detected':   'MPV auto-detected: {}',
+        'log_mpv_not_found':  'MPV not found automatically. Please set the path manually.',
+        'dlg_mpv_missing':    'MPV path is empty and could not be detected automatically.\nPlease install MPV or set its path manually.',
         'dlg_cfg_err_title':  'Configuration error',
         'dlg_cfg_err_msg':    'Required parameters missing (Shodan API Key and MPV Path).',
         'dlg_sw_err_title':   'Missing software',
@@ -92,12 +98,15 @@ TRANSLATIONS = {
         'btn_clear_failed':   'Clear failed',
         'btn_save_streams':   'Save',
         'btn_load_streams':   'Load',
-        'btn_connect_all':    'Connect all',
-        'btn_stop_connect':   'Stop',
+        'btn_connect_all':      'Connect all',
+        'btn_connect_selected': 'Connect selected',
+        'btn_stop_connect':     'Stop',
         'log_reconnect':      'Reconnecting: {}',
         'dlg_save_streams':   'Save stream list',
-        'dlg_load_streams':   'Load stream list',
+        'dlg_load_streams':   'Load stream list(s)',
         'json_filter':        'JSON files (*.json)',
+        'log_load_summary':   'Loaded {0} streams, {1} duplicates skipped ({2} file(s))',
+        'dlg_load_err':       'Could not read the following file(s):\n{}',
         'streams_count':      '{} / {} streams',
         'dlg_mpv_err_title':  'MPV launch error',
         'dlg_mpv_err_msg':    'Could not start MPV. Check the MPV path in the configuration.\n\n{}',
@@ -145,6 +154,10 @@ TRANSLATIONS = {
         'dlg_select_config':  'Seleccionar config',
         'dlg_select_mpv':     'Seleccionar MPV',
         'ini_filter':         'INI files (*.ini)',
+        'btn_detect_mpv':     'Detectar',
+        'log_mpv_detected':   'MPV detectado automáticamente: {}',
+        'log_mpv_not_found':  'MPV no encontrado automáticamente. Por favor establece la ruta manualmente.',
+        'dlg_mpv_missing':    'El campo MPV Path está vacío y no se ha podido detectar automáticamente.\nInstala MPV o establece su ruta manualmente.',
         'dlg_cfg_err_title':  'Error de configuración',
         'dlg_cfg_err_msg':    'Faltan parámetros requeridos (Shodan API Key y MPV Path).',
         'dlg_sw_err_title':   'Software no encontrado',
@@ -161,12 +174,15 @@ TRANSLATIONS = {
         'btn_clear_failed':   'Eliminar fallidos',
         'btn_save_streams':   'Guardar',
         'btn_load_streams':   'Cargar',
-        'btn_connect_all':    'Conectar todas',
-        'btn_stop_connect':   'Detener',
+        'btn_connect_all':      'Conectar todas',
+        'btn_connect_selected': 'Conectar seleccionadas',
+        'btn_stop_connect':     'Detener',
         'log_reconnect':      'Reconectando: {}',
         'dlg_save_streams':   'Guardar lista de streams',
-        'dlg_load_streams':   'Cargar lista de streams',
+        'dlg_load_streams':   'Cargar lista(s) de streams',
         'json_filter':        'JSON files (*.json)',
+        'log_load_summary':   'Cargados {0} streams, {1} duplicados omitidos ({2} fichero(s))',
+        'dlg_load_err':       'No se pudieron leer los siguientes ficheros:\n{}',
         'streams_count':      '{} / {} streams',
         'dlg_mpv_err_title':  'Error al lanzar MPV',
         'dlg_mpv_err_msg':    'No se pudo iniciar MPV. Comprueba la ruta del MPV en la configuración.\n\n{}',
@@ -227,6 +243,24 @@ def _get_open_windows():
         ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
         return titles
     return []
+
+
+def _detect_mpv():
+    """Try to locate the MPV executable automatically. Returns path or None."""
+    found = shutil.which('mpv')
+    if found:
+        return found
+    if sys.platform == 'win32':
+        candidates = [
+            os.path.join(os.environ.get('PROGRAMFILES', r'C:\Program Files'), 'mpv', 'mpv.exe'),
+            os.path.join(os.environ.get('PROGRAMFILES(X86)', r'C:\Program Files (x86)'), 'mpv', 'mpv.exe'),
+            os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'mpv', 'mpv.exe'),
+            os.path.expanduser(r'~\scoop\apps\mpv\current\mpv.exe'),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+    return None
 
 
 class GUIVulnCam(VulnCam):
@@ -488,6 +522,7 @@ class GUIVulnCam(VulnCam):
                 'working': False,
             }
             time.sleep(0.2)
+            self._check_working()  # detect new PID immediately → on_stream_added
 
         if self.signal_received:
             return
@@ -499,6 +534,8 @@ class GUIVulnCam(VulnCam):
             while not self.signal_received and self._active_processes() > 0:
                 self._check_working()
                 time.sleep(1)
+            if not self.signal_received:
+                self._check_working()  # final sweep: catch exits during last sleep
 
 
 class _QtLogHandler(logging.Handler):
@@ -569,6 +606,7 @@ class VulnCamWindow(QMainWindow):
         self._search_start_time = 0.0
         self._running_source = None   # 'shodan' | 'connect_all'
         self._last_stats = (0, 0)     # (active_procs, active_wins)
+        self._reconnect_pids = set()  # PIDs launched via double-click
         self._setup_ui()
         self.config_combo.currentTextChanged.connect(self._on_config_selected)
         self._populate_ini_combo()
@@ -579,8 +617,9 @@ class VulnCamWindow(QMainWindow):
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _setup_ui(self):
-        self.setMinimumWidth(800)
-        self.resize(1200, 760)
+        self.setMinimumWidth(900)
+        QTimer.singleShot(0, self._fit_initial_size)
+        QTimer.singleShot(0, self._autofill_mpv_if_empty)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -640,6 +679,9 @@ class VulnCamWindow(QMainWindow):
         self._browse_mpv_btn = QPushButton()
         self._browse_mpv_btn.clicked.connect(self._browse_mpv)
         mpv_row.addWidget(self._browse_mpv_btn)
+        self._detect_mpv_btn = QPushButton()
+        self._detect_mpv_btn.clicked.connect(self._on_detect_mpv)
+        mpv_row.addWidget(self._detect_mpv_btn)
         cfg_layout.addLayout(mpv_row)
 
         ipgeo_row = QHBoxLayout()
@@ -832,7 +874,8 @@ class VulnCamWindow(QMainWindow):
         filter_row.addWidget(self._count_label)
         sg_layout.addLayout(filter_row)
 
-        actions_row = QHBoxLayout()
+        # Row 1: data management actions
+        actions_row1 = QHBoxLayout()
         self._clear_btn = QPushButton()
         self._clear_btn.clicked.connect(self._clear_streams)
         self._clear_failed_btn = QPushButton()
@@ -841,17 +884,29 @@ class VulnCamWindow(QMainWindow):
         self._save_streams_btn.clicked.connect(self._save_streams)
         self._load_streams_btn = QPushButton()
         self._load_streams_btn.clicked.connect(self._load_streams)
+        for w in (self._clear_btn, self._clear_failed_btn,
+                  self._save_streams_btn, self._load_streams_btn):
+            actions_row1.addWidget(w)
+        sg_layout.addLayout(actions_row1)
+
+        # Row 2: connection actions
+        actions_row2 = QHBoxLayout()
         self._connect_btn = QPushButton()
         self._connect_btn.clicked.connect(self._on_connect_btn_clicked)
-        for w in (self._clear_btn, self._clear_failed_btn, self._save_streams_btn,
-                  self._load_streams_btn, self._connect_btn):
-            actions_row.addWidget(w)
-        sg_layout.addLayout(actions_row)
+        self._connect_selected_btn = QPushButton()
+        self._connect_selected_btn.clicked.connect(self._on_connect_selected_clicked)
+        for w in (self._connect_btn, self._connect_selected_btn):
+            actions_row2.addWidget(w)
+        actions_row2.addStretch()
+        sg_layout.addLayout(actions_row2)
 
         self._streams_list = QListWidget()
         self._streams_list.setFont(QFont('Monospace', 8))
         self._streams_list.setWordWrap(True)
+        self._streams_list.setSelectionMode(
+            QListWidget.SelectionMode.ExtendedSelection)
         self._streams_list.itemDoubleClicked.connect(self._on_stream_double_clicked)
+        self._streams_list.installEventFilter(self)
         sg_layout.addWidget(self._streams_list)
 
         rl.addWidget(self._streams_group)
@@ -876,6 +931,7 @@ class VulnCamWindow(QMainWindow):
         self._label_shodan.setText(t['label_shodan_key'])
         self._label_mpv.setText(t['label_mpv_path'])
         self._browse_mpv_btn.setText(t['btn_browse'])
+        self._detect_mpv_btn.setText(t['btn_detect_mpv'])
         self._label_ipgeo.setText(t['label_ipgeo_key'])
         self._playback_group.setTitle(t['group_playback'])
         self._label_max_proc.setText(t['label_max_proc'])
@@ -912,7 +968,13 @@ class VulnCamWindow(QMainWindow):
         self._save_streams_btn.setText(t['btn_save_streams'])
         self._load_streams_btn.setText(t['btn_load_streams'])
         self._connect_btn.setText(t['btn_connect_all'])
+        self._connect_selected_btn.setText(t['btn_connect_selected'])
         self._update_count()
+
+    def _fit_initial_size(self):
+        """Resize to fit content using actual font metrics, with a sensible minimum."""
+        hint = self.sizeHint()
+        self.resize(max(hint.width() + 80, 1100), max(hint.height() + 40, 700))
 
     def _on_lang_changed(self, _index):
         self._lang = self._lang_combo.currentData()
@@ -970,6 +1032,25 @@ class VulnCamWindow(QMainWindow):
         if path:
             self.mpv_path.setText(path)
 
+    def _on_detect_mpv(self):
+        """Manual detect button: find MPV and fill the field, inform the user."""
+        found = _detect_mpv()
+        if found:
+            self.mpv_path.setText(found)
+            self._append_log(self._t('log_mpv_detected').format(found))
+        else:
+            self._append_log(self._t('log_mpv_not_found'))
+            QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
+                                self._t('dlg_mpv_missing'))
+
+    def _autofill_mpv_if_empty(self):
+        """Silently fill MPV path on startup if the field is empty."""
+        if not self.mpv_path.text().strip():
+            found = _detect_mpv()
+            if found:
+                self.mpv_path.setText(found)
+                self._append_log(self._t('log_mpv_detected').format(found))
+
     def _load_config(self, path):
         config = configparser.ConfigParser()
         config.read(path)
@@ -979,6 +1060,7 @@ class VulnCamWindow(QMainWindow):
             self.mpv_path.setText(config[REQUIRED_SECTION]['mpvfilepath'])
         if config.has_option(OPTIONAL_SECTION, 'ipgeoapikey'):
             self.ipgeo_key.setText(config[OPTIONAL_SECTION]['ipgeoapikey'])
+        self._autofill_mpv_if_empty()
 
     def _build_config(self):
         config = configparser.ConfigParser()
@@ -1013,6 +1095,20 @@ class VulnCamWindow(QMainWindow):
         self._dedup_check.setChecked(True)
         self._check_only_check.setChecked(False)
         self._probe_spin.setValue(PROBE_DEFAULT)
+        self._autofill_mpv_if_empty()
+
+    def _ensure_mpv_path(self):
+        """Returns True if MPV path is set (auto-detecting if empty). Shows error if not found."""
+        if self.mpv_path.text().strip():
+            return True
+        found = _detect_mpv()
+        if found:
+            self.mpv_path.setText(found)
+            self._append_log(self._t('log_mpv_detected').format(found))
+            return True
+        QMessageBox.critical(self, self._t('dlg_mpv_err_title'),
+                             self._t('dlg_mpv_missing'))
+        return False
 
     def _check_credits(self):
         key = self.shodan_key.text().strip()
@@ -1104,29 +1200,36 @@ class VulnCamWindow(QMainWindow):
         item.setForeground(_COLOR_LAUNCHING)
         self._apply_filter()
         self._append_log(self._t('log_reconnect').format(title))
+        self._reconnect_pids.add(proc.pid)
+        self._refresh_stats_label()
         self._watch_reconnect(title, ip, port, proc.pid)
 
     def _watch_reconnect(self, title, ip, port, pid):
         """Poll for the MPV window every second until it appears or timeout expires."""
         start = time.time()
 
+        def _finish(status):
+            self._reconnect_pids.discard(pid)
+            self._refresh_stats_label()
+            self._on_stream_status(title, status)
+
         def check():
             try:
                 psutil.Process(pid)
             except psutil.NoSuchProcess:
                 timer.stop()
-                self._on_stream_status(title, 'failed')
+                _finish('failed')
                 return
             if title in _get_open_windows():
                 timer.stop()
-                self._on_stream_status(title, 'working')
+                _finish('working')
             elif time.time() - start >= DEFAULT_TIMEOUT:
                 timer.stop()
                 try:
                     psutil.Process(pid).kill()
                 except Exception:
                     pass
-                self._on_stream_status(title, 'failed')
+                _finish('failed')
 
         timer = QTimer(self)
         timer.timeout.connect(check)
@@ -1183,38 +1286,46 @@ class VulnCamWindow(QMainWindow):
             json.dump(data, f, indent=2)
 
     def _load_streams(self):
-        path, _ = QFileDialog.getOpenFileName(
+        paths, _ = QFileDialog.getOpenFileNames(
             self, self._t('dlg_load_streams'), '', self._t('json_filter'))
-        if not path:
+        if not paths:
             return
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except Exception:
-            QMessageBox.critical(self, 'Error', path)
-            return
-        for entry in data:
-            ip    = entry.get('ip', '')
-            port  = entry.get('port', 0)
-            title = entry.get('title', f'{ip}:{port}')
-            if not ip or not port:
+        added = skipped = 0
+        errors = []
+        for path in paths:
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+            except Exception:
+                errors.append(path)
                 continue
-            key = (ip, int(port))
-            if key in self._stream_items:
-                item = self._stream_items[key]
-                item.setText('⬤ ' + title)
-                item.setData(Qt.ItemDataRole.UserRole, (ip, int(port), title))
-            else:
+            for entry in data:
+                ip    = entry.get('ip', '')
+                port  = entry.get('port', 0)
+                title = entry.get('title', f'{ip}:{port}')
+                if not ip or not port:
+                    continue
+                key = (ip, int(port))
+                if key in self._stream_items:
+                    skipped += 1
+                    continue
                 item = QListWidgetItem('⬤ ' + title)
+                item.setForeground(_COLOR_LAUNCHING)
                 item.setData(Qt.ItemDataRole.UserRole, (ip, int(port), title))
                 self._stream_items[key] = item
                 self._streams_list.addItem(item)
-            item.setForeground(_COLOR_LAUNCHING)
+                added += 1
+        if errors:
+            QMessageBox.warning(self, 'Error',
+                                self._t('dlg_load_err').format('\n'.join(errors)))
         self._apply_filter()
+        self._append_log(self._t('log_load_summary').format(added, skipped, len(paths)))
 
     def _connect_all(self):
         visible = self._visible_items()
         if not visible:
+            return
+        if not self._ensure_mpv_path():
             return
         config = self._build_config()
         if not check_config(config):
@@ -1247,18 +1358,36 @@ class VulnCamWindow(QMainWindow):
     # ── Run control ───────────────────────────────────────────────────────────
 
     def _set_running(self, running):
+        t = TRANSLATIONS[self._lang]
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running and self._running_source == 'shodan')
+        # connect_all button: toggles to Stop when it started the session
         if self._running_source == 'connect_all':
-            t = TRANSLATIONS[self._lang]
             self._connect_btn.setText(
                 t['btn_stop_connect'] if running else t['btn_connect_all'])
             self._connect_btn.setEnabled(True)
+            self._connect_selected_btn.setEnabled(not running)
+        # connect_selected button: toggles to Stop when it started the session
+        elif self._running_source == 'connect_selected':
+            self._connect_selected_btn.setText(
+                t['btn_stop_connect'] if running else t['btn_connect_selected'])
+            self._connect_selected_btn.setEnabled(True)
+            self._connect_btn.setEnabled(not running)
         else:
             self._connect_btn.setEnabled(not running)
+            self._connect_selected_btn.setEnabled(not running)
         self._clear_btn.setEnabled(not running)
         self._clear_failed_btn.setEnabled(not running)
         self._load_streams_btn.setEnabled(not running)
+
+    def eventFilter(self, obj, event):
+        if (obj is self._streams_list
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and self._streams_list.selectedItems()):
+            self._on_connect_selected_clicked()
+            return True
+        return super().eventFilter(obj, event)
 
     def _on_connect_btn_clicked(self):
         if self._running_source == 'connect_all':
@@ -1266,12 +1395,58 @@ class VulnCamWindow(QMainWindow):
         else:
             self._connect_all()
 
+    def _on_connect_selected_clicked(self):
+        if self._running_source == 'connect_selected':
+            self._stop()
+        else:
+            self._connect_selected()
+
+    def _connect_selected(self):
+        selected = self._streams_list.selectedItems()
+        if not selected:
+            return
+        if not self._ensure_mpv_path():
+            return
+        config = self._build_config()
+        if not check_config(config):
+            QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
+                                 self._t('dlg_cfg_err_msg'))
+            return
+        if sys.platform == 'linux' and not check_linux_software():
+            QMessageBox.critical(self, self._t('dlg_sw_err_title'),
+                                 self._t('dlg_sw_err_msg'))
+            return
+        matches = []
+        for item in selected:
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                ip, port, _ = data
+                matches.append((ip, port))
+                item.setForeground(_COLOR_LAUNCHING)
+        if not matches:
+            return
+        self._apply_filter()
+        args = Namespace(
+            random_pages  = False,
+            leave_windows = self.leave_check.isChecked(),
+            max_processes = self.max_proc_spin.value(),
+            max_windows   = 9999,
+            stream_record = self.record_check.isChecked(),
+            check_only    = self._check_only_check.isChecked(),
+            probe_seconds = self._probe_spin.value(),
+            verbose       = False,
+        )
+        self._running_source = 'connect_selected'
+        self.log_view.clear()
+        self._start_worker(config, args, matches=matches)
+
     def _on_stats_update(self, procs, wins):
         self._last_stats = (procs, wins)
         self._refresh_stats_label()
 
     def _refresh_stats_label(self):
         procs, wins = self._last_stats
+        procs += len(self._reconnect_pids)
         t = TRANSLATIONS[self._lang]
         self._stats_label.setText(
             f'{t["lbl_stat_proc"]}: {procs} / {self.max_proc_spin.value()}   '
@@ -1297,6 +1472,8 @@ class VulnCamWindow(QMainWindow):
         self._set_running(True)
 
     def _start(self):
+        if not self._ensure_mpv_path():
+            return
         config = self._build_config()
         if not check_config(config):
             QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
