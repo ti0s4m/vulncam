@@ -83,6 +83,12 @@ TRANSLATIONS = {
         'dlg_credits_title':    'Shodan credits',
         'dlg_credits_msg':      'Query credits: {}\nScan credits: {}',
         'dlg_credits_err':      'Could not retrieve credits. Check your API key.',
+        'btn_shodan_info':      'Info',
+        'log_shodan_info_err':  'Shodan info error: {}',
+        'log_shodan_info_hdr':  '── Shodan account info ──',
+        'log_worker_error':     'Error: {}',
+        'dlg_load_err_title':   'Error',
+        'log_dev_plan_limit':   'Dev plan: random pages limited to 1. Fetching 1 random page.',
         'log_duplicate':        'Already listed, skipping: {}',
         'btn_restore':        'Restore defaults',
         'btn_start':          'START',
@@ -172,6 +178,12 @@ TRANSLATIONS = {
         'dlg_credits_title':    'Créditos Shodan',
         'dlg_credits_msg':      'Créditos de consulta: {}\nCréditos de escaneo: {}',
         'dlg_credits_err':      'No se pudieron obtener los créditos. Comprueba tu API key.',
+        'btn_shodan_info':      'Info',
+        'log_shodan_info_err':  'Error info Shodan: {}',
+        'log_shodan_info_hdr':  '── Información cuenta Shodan ──',
+        'log_worker_error':     'Error: {}',
+        'dlg_load_err_title':   'Error',
+        'log_dev_plan_limit':   'Plan Dev: páginas aleatorias limitadas a 1. Se obtendrá 1 página aleatoria.',
         'log_duplicate':        'Ya en el listado, omitiendo: {}',
         'btn_restore':        'Restaurar valores por defecto',
         'btn_start':          'START',
@@ -802,6 +814,8 @@ class GUIVulnCam(VulnCam):
         self.probe_seconds     = args.probe_seconds
         self.generate_mosaic   = getattr(args, 'generate_mosaic', False)
         self.thumb_timeout     = getattr(args, 'thumb_timeout', DEFAULT_TIMEOUT)
+        self.shodan_plan       = getattr(args, 'shodan_plan', '')
+        self._log_dev_plan_limit = getattr(args, 'log_dev_plan_limit', '')
         self.thumb_base_dir    = None    # set by worker before run()
         self.on_stream_added       = None
         self.on_stream_status      = None
@@ -964,16 +978,30 @@ class GUIVulnCam(VulnCam):
             if total == 0:
                 return 0, results
             total_pages = max(1, (total + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)
-            page_list = list(range(1, min(MAX_PAGES, total_pages + 1)))
+            available = min(MAX_PAGES, total_pages)
+            n = min(pages, available)
+            if self.random_pages and self.shodan_plan == 'dev' and n > 1:
+                _vulncam_logger.info(self._log_dev_plan_limit)
+                n = 1
             if self.random_pages:
-                shuffle(page_list)
-            for _ in range(min(pages, total_pages)):
-                next_page = page_list.pop(0)
-                q = self.api.search(query, page=next_page)
+                from random import sample
+                page_list = sorted(sample(range(1, available + 1), n))
+            else:
+                page_list = list(range(1, n + 1))
+            for next_page in page_list:
+                _vulncam_logger.info('Fetching page %d...', next_page)
+                try:
+                    q = self.api.search(query, page=next_page)
+                except shodan.APIError as e:
+                    _vulncam_logger.warning('Page %d failed: %s', next_page, e)
+                    continue
+                count = len(q.get('matches', []))
+                _vulncam_logger.info('Page %d: %d result(s)', next_page, count)
                 for r in q['matches']:
                     ip = r['ip_str']
                     results.append((ip, r['port']))
                     self._geo_cache[ip] = self._shodan_geo(r)
+            shuffle(results)
             return total, results
         except shodan.APIError as e:
             _vulncam_logger.error('Error: %s', e)
@@ -1200,6 +1228,7 @@ class VulnCamWindow(QMainWindow):
         super().__init__()
         self._lang = 'en'
         self.worker = None
+        self._shodan_info = None   # cached result of api.info(); refreshed on key change
         self._stream_items = {}    # (ip, port) → QListWidgetItem
         self._mosaic_cells = {}    # (ip, port) → MosaicCell
         self._audio_probes  = {}   # (ip, port) → AudioProbeTask.Signals
@@ -1295,7 +1324,11 @@ class VulnCamWindow(QMainWindow):
         shodan_row.addWidget(self._label_shodan)
         self.shodan_key = QLineEdit()
         self.shodan_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.shodan_key.editingFinished.connect(self._refresh_shodan_info)
         shodan_row.addWidget(self.shodan_key)
+        self._shodan_info_btn = QPushButton()
+        self._shodan_info_btn.clicked.connect(self._on_shodan_info_clicked)
+        shodan_row.addWidget(self._shodan_info_btn)
         cfg_layout.addLayout(shodan_row)
 
         mpv_row = QHBoxLayout()
@@ -1599,6 +1632,7 @@ class VulnCamWindow(QMainWindow):
         self._browse_cfg_btn.setText(t['btn_browse'])
         self._save_cfg_btn.setText(t['btn_save_cfg'])
         self._label_shodan.setText(t['label_shodan_key'])
+        self._shodan_info_btn.setText(t['btn_shodan_info'])
         self._label_mpv.setText(t['label_mpv_path'])
         self._browse_mpv_btn.setText(t['btn_browse'])
         self._detect_mpv_btn.setText(t['btn_detect_mpv'])
@@ -1761,6 +1795,7 @@ class VulnCamWindow(QMainWindow):
         config.read(path)
         if config.has_option(REQUIRED_SECTION, 'shodanapikey'):
             self.shodan_key.setText(config[REQUIRED_SECTION]['shodanapikey'])
+            self._refresh_shodan_info()
         if config.has_option(REQUIRED_SECTION, 'mpvfilepath'):
             self.mpv_path.setText(config[REQUIRED_SECTION]['mpvfilepath'])
         if config.has_option(OPTIONAL_SECTION, 'ipgeoapikey'):
@@ -1818,6 +1853,27 @@ class VulnCamWindow(QMainWindow):
         QMessageBox.critical(self, self._t('dlg_mpv_err_title'),
                              self._t('dlg_mpv_missing'))
         return False
+
+    def _refresh_shodan_info(self):
+        """Fetch and cache api.info(). Called on key change and config load."""
+        key = self.shodan_key.text().strip()
+        if not key:
+            self._shodan_info = None
+            return
+        try:
+            self._shodan_info = shodan.Shodan(key).info()
+        except Exception:
+            self._shodan_info = None
+
+    def _on_shodan_info_clicked(self):
+        self._refresh_shodan_info()
+        if self._shodan_info is None:
+            self._append_log(self._t('log_shodan_info_err').format('no API key or connection error'))
+            return
+        lines = [self._t('log_shodan_info_hdr')]
+        for k, v in self._shodan_info.items():
+            lines.append(f'  {k}: {v}')
+        self._append_log('\n'.join(lines))
 
     def _check_credits(self):
         key = self.shodan_key.text().strip()
@@ -2130,7 +2186,7 @@ class VulnCamWindow(QMainWindow):
                     audio_map[key] = audio
                 added += 1
         if errors:
-            QMessageBox.warning(self, 'Error',
+            QMessageBox.warning(self, self._t('dlg_load_err_title'),
                                 self._t('dlg_load_err').format('\n'.join(errors)))
         if self._mosaic_radio.isChecked():
             self._sync_mosaic_cells()
@@ -2517,6 +2573,8 @@ class VulnCamWindow(QMainWindow):
             self.worker.stop()
             self.worker.wait(3000)
 
+        args.shodan_plan = (self._shodan_info or {}).get('plan', '')
+        args.log_dev_plan_limit = self._t('log_dev_plan_limit')
         max_procs_ref = [args.max_processes]
         self._proc_conn = self.max_proc_spin.valueChanged.connect(
             lambda v: max_procs_ref.__setitem__(0, v))
@@ -2536,7 +2594,7 @@ class VulnCamWindow(QMainWindow):
             w.deleteLater()
 
         w.log_message.connect(self._append_log)
-        w.error.connect(lambda e: self._append_log(f'Error: {e}'))
+        w.error.connect(lambda e: self._append_log(self._t('log_worker_error').format(e)))
         w.stream_added.connect(self._on_stream_added)
         w.stream_status.connect(self._on_stream_status)
         w.stream_skipped.connect(

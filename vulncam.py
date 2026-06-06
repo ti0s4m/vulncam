@@ -217,14 +217,19 @@ class VulnCam:
             if total == 0:
                 return 0, results
             total_pages = max(1, (total + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)
-            page_list = list(range(1, min(MAX_PAGES, total_pages + 1)))
+            available = min(MAX_PAGES, total_pages)
+            n = min(pages, available)
             if self.random_pages:
-                shuffle(page_list)
-            for _ in range(min(pages, total_pages)):
-                next_page = page_list.pop(0)
+                from random import sample
+                page_list = sorted(sample(range(1, available + 1), n))
+            else:
+                page_list = list(range(1, n + 1))
+            for next_page in page_list:
                 q = self.api.search(query, page=next_page)
                 for result in q['matches']:
                     results.append((result['ip_str'], result['port']))
+            if self.random_pages:
+                shuffle(results)
             return total, results
         except shodan.APIError as e:
             logger.error('Error: %s', e)
