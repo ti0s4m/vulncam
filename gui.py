@@ -12,7 +12,7 @@ import configparser
 import logging
 from argparse import Namespace
 from datetime import datetime
-from random import shuffle
+from random import sample, shuffle
 
 import psutil
 import requests
@@ -29,7 +29,7 @@ from PyQt6.QtCore import (QThread, QThreadPool, QRunnable,
 from PyQt6.QtGui import QFont, QTextCursor, QColor, QIcon, QPixmap, QPainter
 
 from vulncam import (
-    VulnCam, check_config, check_linux_software,
+    VulnCam, check_config, check_linux_software, list_window_titles,
     REQUIRED_SECTION, OPTIONAL_SECTION,
     DEFAULT_CONFIG_FILE, DEFAULT_QUERY, DEFAULT_MAX_PROCS, DEFAULT_PAGES,
     DEFAULT_TIMEOUT, RESULTS_PER_PAGE, MAX_PAGES,
@@ -269,33 +269,6 @@ _COUNTRY_CODES = [('', '—')] + sorted([
 ], key=lambda x: x[1])
 
 
-def _get_open_windows():
-    """Return list of visible window titles, cross-platform."""
-    if sys.platform == 'linux':
-        try:
-            out = subprocess.run(['wmctrl', '-l'], stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL).stdout.decode()
-            return [' '.join(w.split()[3:]).replace('"', '')
-                    for w in out.strip().splitlines() if w.split()]
-        except Exception:
-            return []
-    if sys.platform == 'win32':
-        import ctypes
-        titles = []
-        def _cb(hwnd, _):
-            if ctypes.windll.user32.IsWindowVisible(hwnd):
-                n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
-                if n:
-                    buf = ctypes.create_unicode_buffer(n + 1)
-                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, n + 1)
-                    titles.append(buf.value.replace('"', ''))
-            return True
-        EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-        ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
-        return titles
-    return []
-
-
 def _detect_mpv():
     """Try to locate the MPV executable automatically. Returns path or None."""
     found = shutil.which('mpv')
@@ -337,6 +310,7 @@ class MosaicCell(QFrame):
         self._thumb_retries = 0
         self._selected = False
         self._filter_hidden = False
+        self._placeholder_cache = {}   # (text, color, w, h) → QPixmap
         self._thumb_w = thumb_w
         self._thumb_h = thumb_h
         self.setFixedWidth(thumb_w + 20)
@@ -365,6 +339,10 @@ class MosaicCell(QFrame):
         self._refresh()
 
     def _make_placeholder(self, text, color):
+        key = (text, color.name(), self._thumb_w, self._thumb_h)
+        cached = self._placeholder_cache.get(key)
+        if cached is not None:
+            return cached
         try:
             px = QPixmap(self._thumb_w, self._thumb_h)
             px.fill(QColor('#1a1a1a'))
@@ -373,10 +351,11 @@ class MosaicCell(QFrame):
             p.setFont(QFont('Sans', 11, QFont.Weight.Bold))
             p.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, text)
             p.end()
-            return px
         except Exception as e:
             print(f'MosaicCell._make_placeholder error: {e}', file=sys.stderr)
-            return QPixmap(self._thumb_w, self._thumb_h)
+            px = QPixmap(self._thumb_w, self._thumb_h)
+        self._placeholder_cache[key] = px
+        return px
 
     def _refresh(self):
         if not self._has_thumbnail:
@@ -405,6 +384,21 @@ class MosaicCell(QFrame):
     def set_selected(self, selected):
         self._selected = selected
         self._refresh()
+
+    def set_filter_hidden(self, hidden):
+        self._filter_hidden = hidden
+
+    def is_filter_hidden(self):
+        return self._filter_hidden
+
+    def retries(self):
+        return self._thumb_retries
+
+    def bump_retries(self):
+        self._thumb_retries += 1
+
+    def reset_retries(self):
+        self._thumb_retries = 0
 
     def set_status(self, status):
         self._status = status
@@ -454,6 +448,7 @@ class MosaicCell(QFrame):
                self._thumb_h - b.height() - 4)
 
     def resize_thumb(self, w, h):
+        self._placeholder_cache.clear()   # cached placeholders are size-specific
         self._thumb_w = w
         self._thumb_h = h
         self.setFixedWidth(w + 20)
@@ -601,7 +596,7 @@ class MosaicGrid(QScrollArea):
     def set_cell_visible(self, ip, port, visible):
         cell = self._cells.get((ip, port))
         if cell:
-            cell._filter_hidden = not visible
+            cell.set_filter_hidden(not visible)
         self._timer.start()
 
     def _do_relayout(self):
@@ -614,7 +609,7 @@ class MosaicGrid(QScrollArea):
         for key in self._order:
             cell = self._cells.get(key)
             if cell:
-                if not cell._filter_hidden:
+                if not cell.is_filter_hidden():
                     self._glayout.addWidget(cell, row, col)
                     cell.show()
                     col += 1
@@ -938,7 +933,7 @@ class GUIVulnCam(VulnCam):
                 self.on_stats_update(len(self.processes), 0)
             return 0
 
-        current_windows = _get_open_windows()
+        current_windows = list_window_titles()
         now = time.time()
         cnt_working = 0
         for pid in list(self.processes):
@@ -983,7 +978,6 @@ class GUIVulnCam(VulnCam):
                 _vulncam_logger.info(self._log_dev_plan_limit)
                 n = 1
             if self.random_pages:
-                from random import sample
                 page_list = sorted(sample(range(1, available + 1), n))
             else:
                 page_list = list(range(1, n + 1))
@@ -1000,7 +994,8 @@ class GUIVulnCam(VulnCam):
                     ip = r['ip_str']
                     results.append((ip, r['port']))
                     self._geo_cache[ip] = self._shodan_geo(r)
-            shuffle(results)
+            if self.random_pages:
+                shuffle(results)
             return total, results
         except shodan.APIError as e:
             _vulncam_logger.error('Error: %s', e)
@@ -1939,7 +1934,7 @@ class VulnCamWindow(QMainWindow):
                 # Live connection (connect_all / connect_selected): keep thumbnail
                 # and current status — only clear the audio badge so it re-probes
                 cell = self._mosaic_cells[key]
-                cell._thumb_retries = 0
+                cell.reset_retries()
                 cell.set_audio_type(None)
 
         self._apply_filter()
@@ -2051,7 +2046,7 @@ class VulnCamWindow(QMainWindow):
                 timer.stop()
                 _finish('failed')
                 return
-            if title in _get_open_windows():
+            if title in list_window_titles():
                 timer.stop()
                 _finish('working')
             elif time.time() - start >= DEFAULT_TIMEOUT:
@@ -2472,8 +2467,8 @@ class VulnCamWindow(QMainWindow):
         """Re-queue thumbnail generation or mark as failed if retries exhausted."""
         if cell.has_thumbnail():
             return   # already have one, nothing to do
-        if self.mpv_path.text().strip() and cell._thumb_retries < MAX_THUMB_RETRIES:
-            cell._thumb_retries += 1
+        if self.mpv_path.text().strip() and cell.retries() < MAX_THUMB_RETRIES:
+            cell.bump_retries()
             cell.set_status('launching')   # back to orange while retrying
             self._queue_thumbnail(ip, port)
         else:

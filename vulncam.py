@@ -9,7 +9,7 @@ import time
 import requests
 import signal
 import sys
-from random import shuffle
+from random import sample, shuffle
 
 DEFAULT_CONFIG_FILE = 'config.ini'
 DEFAULT_QUERY = 'RTSP has_screenshot:yes'
@@ -95,6 +95,33 @@ def check_linux_software():
     return True
 
 
+def list_window_titles():
+    """Return list of visible window titles, cross-platform (Linux/Windows)."""
+    if sys.platform == 'linux':
+        try:
+            out = subprocess.run(['wmctrl', '-l'], stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL).stdout.decode()
+            return [' '.join(w.split()[3:]).replace('"', '')
+                    for w in out.strip().splitlines() if w.split()]
+        except Exception:
+            return []
+    if sys.platform == 'win32':
+        import ctypes
+        titles = []
+        def _cb(hwnd, _):
+            if ctypes.windll.user32.IsWindowVisible(hwnd):
+                n = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                if n:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    ctypes.windll.user32.GetWindowTextW(hwnd, buf, n + 1)
+                    titles.append(buf.value.replace('"', ''))
+            return True
+        EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+        ctypes.windll.user32.EnumWindows(EnumProc(_cb), 0)
+        return titles
+    return []
+
+
 class VulnCam:
     def __init__(self, config, args):
         self.config        = config
@@ -137,13 +164,7 @@ class VulnCam:
         return cnt
 
     def _get_current_windows(self):
-        try:
-            result = subprocess.run(['wmctrl', '-l'], stdout=subprocess.PIPE,
-                                    stderr=subprocess.DEVNULL).stdout.decode('utf-8')
-            windows = result.strip().split('\n')
-            return [" ".join(w.split()[3:]).replace('"', '') for w in windows if w.split()]
-        except Exception:
-            return []
+        return list_window_titles()
 
     def _check_working(self):
         """
@@ -185,16 +206,18 @@ class VulnCam:
             r = requests.get(IP_API % ip, timeout=GEO_TIMEOUT)
             j = r.json()
         except Exception:
+            j = {}
+        # ip-api.com returns HTTP 200 with {"status":"fail"} for private/invalid IPs
+        # or when rate-limited, so fall back to ipgeo whenever it has no usable data.
+        if (not j or j.get('status') == 'fail') \
+                and self.config.has_option(OPTIONAL_SECTION, 'ipgeoapikey'):
             try:
-                j = {}
-                if self.config.has_option(OPTIONAL_SECTION, 'ipgeoapikey'):
-                    r = requests.get(IP_GEO % (self.config[OPTIONAL_SECTION]['ipgeoapikey'], ip),
-                                     timeout=GEO_TIMEOUT)
-                    j = r.json()
+                r = requests.get(IP_GEO % (self.config[OPTIONAL_SECTION]['ipgeoapikey'], ip),
+                                 timeout=GEO_TIMEOUT)
+                j = r.json()
             except Exception:
-                j = {}
-        finally:
-            self._last_geo_request = time.time()
+                pass
+        self._last_geo_request = time.time()
         country = region = city = '-'
         if 'country' in j:
             country = j['country']
@@ -220,7 +243,6 @@ class VulnCam:
             available = min(MAX_PAGES, total_pages)
             n = min(pages, available)
             if self.random_pages:
-                from random import sample
                 page_list = sorted(sample(range(1, available + 1), n))
             else:
                 page_list = list(range(1, n + 1))
