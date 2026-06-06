@@ -244,8 +244,7 @@ THUMB_SIZES = [
     ('medium', 240, 135),
     ('large',  320, 180),
 ]
-THUMB_W = 240
-THUMB_H = 135   # 16:9 medium (default)
+THUMB_W, THUMB_H = THUMB_SIZES[1][1:]   # 16:9 medium (default)
 MAX_THUMB_RETRIES = 2
 
 QUERY_PRESETS = [
@@ -393,11 +392,11 @@ class MosaicCell(QFrame):
             else:
                 self._img_lbl.setPixmap(
                     self._make_placeholder(self._no_signal_text, _COLOR_FAILED))
-        c = {'waiting': '#404040', 'launching': '#E8A020',
-             'working': '#20A050', 'failed': '#C03030'}
-        col = c.get(self._status, '#E8A020')
+        c = {'waiting': '#404040', 'launching': _COLOR_LAUNCHING.name(),
+             'working': _COLOR_WORKING.name(), 'failed': _COLOR_FAILED.name()}
+        col = c.get(self._status, _COLOR_LAUNCHING.name())
         bg = '#1e2a38' if self._selected else '#0d0d0d'
-        border = f'3px solid #ffffff' if self._selected else f'2px solid {col}'
+        border = '3px solid #ffffff' if self._selected else f'2px solid {col}'
         self.setStyleSheet(
             f'MosaicCell {{ border: {border}; border-radius: 4px;'
             f' background: {bg}; }}'
@@ -1021,23 +1020,24 @@ class GUIVulnCam(VulnCam):
         return matches
 
     def _batch_geo_lookup(self, ips):
-        """Single POST to ip-api.com/batch — up to 100 IPs, counts as 1 request."""
-        try:
-            r = requests.post(
-                'http://ip-api.com/batch',
-                json=[{'query': ip} for ip in ips],
-                timeout=10,
-            )
-            for item in r.json():
-                ip = item.get('query', '')
-                if ip and item.get('status') == 'success':
-                    self._geo_cache[ip] = (
-                        item.get('country', '-') or '-',
-                        item.get('regionName', '-') or '-',
-                        item.get('city', '-') or '-',
-                    )
-        except Exception:
-            pass  # geo is optional
+        """Resolve geo for a list of IPs via ip-api.com/batch (100 per request)."""
+        for i in range(0, len(ips), 100):
+            try:
+                r = requests.post(
+                    'http://ip-api.com/batch',
+                    json=[{'query': ip} for ip in ips[i:i + 100]],
+                    timeout=10,
+                )
+                for item in r.json():
+                    ip = item.get('query', '')
+                    if ip and item.get('status') == 'success':
+                        self._geo_cache[ip] = (
+                            item.get('country', '-') or '-',
+                            item.get('regionName', '-') or '-',
+                            item.get('city', '-') or '-',
+                        )
+            except Exception:
+                continue  # geo is optional
 
     def run(self, query, total_results, pages):
         info = self.api.info()
@@ -1062,8 +1062,7 @@ class GUIVulnCam(VulnCam):
         # Upgrade geo with ip-api batch (better quality); Shodan data stays as fallback
         ips = [ip for ip, _port in matches]
         _vulncam_logger.info('Fetching geo data for %d IPs...', len(ips))
-        for i in range(0, len(ips), 100):
-            self._batch_geo_lookup(ips[i:i + 100])
+        self._batch_geo_lookup(ips)
         self._run_match_loop(matches)
 
     def run_matches(self, matches):
@@ -1071,8 +1070,7 @@ class GUIVulnCam(VulnCam):
         uncached = [ip for ip, _port in matches if ip not in self._geo_cache]
         if uncached:
             _vulncam_logger.info('Fetching geo data for %d IPs...', len(uncached))
-            for i in range(0, len(uncached), 100):
-                self._batch_geo_lookup(uncached[i:i + 100])
+            self._batch_geo_lookup(uncached)
         self._run_match_loop(matches)
 
     def _run_match_loop(self, matches):
@@ -1932,9 +1930,7 @@ class VulnCamWindow(QMainWindow):
             self._mosaic_cells[key] = self._mosaic_grid.get_cell(ip, port)
             # Queue thumbnail only if no worker is running (avoid competing MPV processes)
             if self._mosaic_radio.isChecked() and self._running_source is None:
-                mpv = self.mpv_path.text().strip()
-                if mpv:
-                    self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+                self._queue_thumbnail(ip, port)
         elif key and key in self._mosaic_cells:
             regenerating = self._running_source in ('shodan', 'scan_all', 'scan_selected')
             if regenerating:
@@ -1976,9 +1972,7 @@ class VulnCamWindow(QMainWindow):
                 # Stream confirmed working with no active run (e.g. double-click) →
                 # now safe to capture thumbnail (no competing MPV window process)
                 cell.set_status(status)
-                mpv = self.mpv_path.text().strip()
-                if mpv:
-                    self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+                self._queue_thumbnail(ip, port)
             else:
                 cell.set_status(status)
         if status == 'working':
@@ -2018,7 +2012,6 @@ class VulnCamWindow(QMainWindow):
             QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
                                 self._t('dlg_mpv_no_path'))
             return
-        prev_color = item.foreground().color()
         cmd = [mpv_path, f'--title={title}']
         if self.record_check.isChecked():
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -2198,27 +2191,25 @@ class VulnCamWindow(QMainWindow):
         self._apply_filter()
         self._append_log(self._t('log_load_summary').format(added, skipped, len(paths)))
 
-    def _connect_all(self):
-        visible = self._visible_items()
-        if not visible:
-            return
+    def _prepare_run(self):
+        """Validate MPV path, config and required software for a run.
+        Returns the built config, or None if validation failed (error already shown)."""
         if not self._ensure_mpv_path():
-            return
+            return None
         config = self._build_config()
         if not check_config(config):
             QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
                                  self._t('dlg_cfg_err_msg'))
-            return
+            return None
         if sys.platform == 'linux' and not check_linux_software():
             QMessageBox.critical(self, self._t('dlg_sw_err_title'),
                                  self._t('dlg_sw_err_msg'))
-            return
+            return None
+        return config
 
-        for _, item in visible:
-            item.setForeground(_COLOR_LAUNCHING)
-
-        matches = [key for key, _ in visible]
-        args = Namespace(
+    def _make_args(self, **overrides):
+        """Build the Namespace of run arguments, applying per-action overrides."""
+        base = dict(
             random_pages  = False,
             leave_windows = self.leave_check.isChecked(),
             max_processes = self.max_proc_spin.value(),
@@ -2226,53 +2217,58 @@ class VulnCamWindow(QMainWindow):
             stream_record = self.record_check.isChecked(),
             check_only    = self._check_only_check.isChecked() and self._list_radio.isChecked(),
             probe_seconds = self._probe_spin.value(),
-            generate_mosaic  = False,
-            thumb_timeout    = self._thumb_timeout_spin.value(),
-            verbose          = False,
+            generate_mosaic = False,
+            thumb_timeout   = self._thumb_timeout_spin.value(),
+            verbose         = False,
         )
+        base.update(overrides)
+        return Namespace(**base)
+
+    def _queue_thumbnail(self, ip, port):
+        """Queue a thumbnail capture for (ip, port) if an MPV path is set."""
+        mpv = self.mpv_path.text().strip()
+        if mpv:
+            self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+
+    def _connect_all(self):
+        visible = self._visible_items()
+        if not visible:
+            return
+        config = self._prepare_run()
+        if config is None:
+            return
+        for _, item in visible:
+            item.setForeground(_COLOR_LAUNCHING)
+        matches = [key for key, _ in visible]
+        args = self._make_args()
         self._running_source = 'connect_all'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
 
     # ── Run control ───────────────────────────────────────────────────────────
 
+    # source → (action button attr, normal-label translation key)
+    _ACTION_BUTTONS = {
+        'connect_all':      ('_connect_btn',          'btn_connect_all'),
+        'connect_selected': ('_connect_selected_btn', 'btn_connect_selected'),
+        'scan_all':         ('_scan_btn',             'btn_scan'),
+        'scan_selected':    ('_scan_selected_btn',    'btn_scan_selected'),
+    }
+
     def _set_running(self, running):
         t = TRANSLATIONS[self._lang]
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running and self._running_source == 'shodan')
-        if self._running_source == 'connect_all':
-            self._connect_btn.setText(
-                t['btn_stop_connect'] if running else t['btn_connect_all'])
-            self._connect_btn.setEnabled(True)
-            self._connect_selected_btn.setEnabled(not running)
-            self._scan_btn.setEnabled(not running)
-            self._scan_selected_btn.setEnabled(not running)
-        elif self._running_source == 'connect_selected':
-            self._connect_selected_btn.setText(
-                t['btn_stop_connect'] if running else t['btn_connect_selected'])
-            self._connect_selected_btn.setEnabled(True)
-            self._connect_btn.setEnabled(not running)
-            self._scan_btn.setEnabled(not running)
-            self._scan_selected_btn.setEnabled(not running)
-        elif self._running_source == 'scan_all':
-            self._scan_btn.setText(
-                t['btn_stop_connect'] if running else t['btn_scan'])
-            self._scan_btn.setEnabled(True)
-            self._connect_btn.setEnabled(not running)
-            self._connect_selected_btn.setEnabled(not running)
-            self._scan_selected_btn.setEnabled(not running)
-        elif self._running_source == 'scan_selected':
-            self._scan_selected_btn.setText(
-                t['btn_stop_connect'] if running else t['btn_scan_selected'])
-            self._scan_selected_btn.setEnabled(True)
-            self._connect_btn.setEnabled(not running)
-            self._connect_selected_btn.setEnabled(not running)
-            self._scan_btn.setEnabled(not running)
-        else:
-            self._connect_btn.setEnabled(not running)
-            self._connect_selected_btn.setEnabled(not running)
-            self._scan_btn.setEnabled(not running)
-            self._scan_selected_btn.setEnabled(not running)
+        # Every action button follows the idle/busy rule by default...
+        for btn in (self._connect_btn, self._connect_selected_btn,
+                    self._scan_btn, self._scan_selected_btn):
+            btn.setEnabled(not running)
+        # ...except the one that triggered the run, which stays enabled and toggles to STOP
+        active = self._ACTION_BUTTONS.get(self._running_source)
+        if active:
+            btn = getattr(self, active[0])
+            btn.setEnabled(True)
+            btn.setText(t['btn_stop_connect'] if running else t[active[1]])
         self._clear_btn.setEnabled(not running)
         self._clear_failed_btn.setEnabled(not running)
         self._load_streams_btn.setEnabled(not running)
@@ -2313,32 +2309,14 @@ class VulnCamWindow(QMainWindow):
         visible = self._visible_items()
         if not visible:
             return
-        if not self._ensure_mpv_path():
-            return
-        config = self._build_config()
-        if not check_config(config):
-            QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
-                                 self._t('dlg_cfg_err_msg'))
-            return
-        if sys.platform == 'linux' and not check_linux_software():
-            QMessageBox.critical(self, self._t('dlg_sw_err_title'),
-                                 self._t('dlg_sw_err_msg'))
+        config = self._prepare_run()
+        if config is None:
             return
         for _, item in visible:
             item.setForeground(_COLOR_LAUNCHING)
         matches = [key for key, _ in visible]
-        args = Namespace(
-            random_pages  = False,
-            leave_windows = False,
-            max_processes = self.max_proc_spin.value(),
-            max_windows   = 9999,
-            stream_record = False,
-            check_only    = False,
-            probe_seconds = self._probe_spin.value(),
-            generate_mosaic = True,
-            thumb_timeout   = self._thumb_timeout_spin.value(),
-            verbose         = False,
-        )
+        args = self._make_args(leave_windows=False, stream_record=False,
+                               check_only=False, generate_mosaic=True)
         self._running_source = 'scan_all'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
@@ -2348,16 +2326,8 @@ class VulnCamWindow(QMainWindow):
         selected_keys = self._mosaic_grid.selected_keys()
         if not selected_keys:
             return
-        if not self._ensure_mpv_path():
-            return
-        config = self._build_config()
-        if not check_config(config):
-            QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
-                                 self._t('dlg_cfg_err_msg'))
-            return
-        if sys.platform == 'linux' and not check_linux_software():
-            QMessageBox.critical(self, self._t('dlg_sw_err_title'),
-                                 self._t('dlg_sw_err_msg'))
+        config = self._prepare_run()
+        if config is None:
             return
         matches = []
         for ip, port in selected_keys:
@@ -2367,18 +2337,8 @@ class VulnCamWindow(QMainWindow):
                 matches.append((ip, port))
         if not matches:
             return
-        args = Namespace(
-            random_pages  = False,
-            leave_windows = False,
-            max_processes = self.max_proc_spin.value(),
-            max_windows   = 9999,
-            stream_record = False,
-            check_only    = False,
-            probe_seconds = self._probe_spin.value(),
-            generate_mosaic = True,
-            thumb_timeout   = self._thumb_timeout_spin.value(),
-            verbose         = False,
-        )
+        args = self._make_args(leave_windows=False, stream_record=False,
+                               check_only=False, generate_mosaic=True)
         self._running_source = 'scan_selected'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
@@ -2412,16 +2372,8 @@ class VulnCamWindow(QMainWindow):
                     selected_keys.append((data[0], data[1]))
         if not selected_keys:
             return
-        if not self._ensure_mpv_path():
-            return
-        config = self._build_config()
-        if not check_config(config):
-            QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
-                                 self._t('dlg_cfg_err_msg'))
-            return
-        if sys.platform == 'linux' and not check_linux_software():
-            QMessageBox.critical(self, self._t('dlg_sw_err_title'),
-                                 self._t('dlg_sw_err_msg'))
+        config = self._prepare_run()
+        if config is None:
             return
         matches = []
         for ip, port in selected_keys:
@@ -2433,18 +2385,7 @@ class VulnCamWindow(QMainWindow):
         if not matches:
             return
         self._apply_filter()
-        args = Namespace(
-            random_pages  = False,
-            leave_windows = self.leave_check.isChecked(),
-            max_processes = self.max_proc_spin.value(),
-            max_windows   = 9999,
-            stream_record = self.record_check.isChecked(),
-            check_only    = self._check_only_check.isChecked() and self._list_radio.isChecked(),
-            probe_seconds = self._probe_spin.value(),
-            generate_mosaic  = False,
-            thumb_timeout    = self._thumb_timeout_spin.value(),
-            verbose          = False,
-        )
+        args = self._make_args()
         self._running_source = 'connect_selected'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
@@ -2531,11 +2472,10 @@ class VulnCamWindow(QMainWindow):
         """Re-queue thumbnail generation or mark as failed if retries exhausted."""
         if cell.has_thumbnail():
             return   # already have one, nothing to do
-        mpv = self.mpv_path.text().strip()
-        if mpv and cell._thumb_retries < MAX_THUMB_RETRIES:
+        if self.mpv_path.text().strip() and cell._thumb_retries < MAX_THUMB_RETRIES:
             cell._thumb_retries += 1
             cell.set_status('launching')   # back to orange while retrying
-            self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+            self._queue_thumbnail(ip, port)
         else:
             cell.set_status('failed')
 
@@ -2609,32 +2549,16 @@ class VulnCamWindow(QMainWindow):
         self._set_running(True)
 
     def _start(self):
-        if not self._ensure_mpv_path():
+        config = self._prepare_run()
+        if config is None:
             return
-        config = self._build_config()
-        if not check_config(config):
-            QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
-                                 self._t('dlg_cfg_err_msg'))
-            return
-        if sys.platform == 'linux' and not check_linux_software():
-            QMessageBox.critical(self, self._t('dlg_sw_err_title'),
-                                 self._t('dlg_sw_err_msg'))
-            return
-        args = Namespace(
+        args = self._make_args(
             query         = self.query_field.text().strip() or DEFAULT_QUERY,
             extend        = self.extend_field.text().strip(),
             pages         = self.pages_spin.value(),
-            max_processes = self.max_proc_spin.value(),
-            max_windows   = 9999,
             random_pages  = self.random_check.isChecked(),
-            stream_record = self.record_check.isChecked(),
-            leave_windows = self.leave_check.isChecked(),
             total_results = self.allres_check.isChecked(),
-            check_only       = self._check_only_check.isChecked() and self._list_radio.isChecked(),
-            probe_seconds    = self._probe_spin.value(),
-            generate_mosaic  = self._mosaic_radio.isChecked(),
-            thumb_timeout    = self._thumb_timeout_spin.value(),
-            verbose          = False,
+            generate_mosaic = self._mosaic_radio.isChecked(),
         )
         dedup = self._dedup_check.isChecked()
         items_ref = self._stream_items
@@ -2674,7 +2598,6 @@ class VulnCamWindow(QMainWindow):
 
 def _qt_message_handler(mode, context, message):
     """Forward Qt warnings/errors to stderr so they appear in the terminal."""
-    import traceback
     levels = {0: 'Qt[Debug]', 1: 'Qt[Warning]', 2: 'Qt[Critical]',
               3: 'Qt[Fatal]', 4: 'Qt[Info]'}
     print(f'{levels.get(mode, "Qt[?]")}: {message}', file=sys.stderr)
