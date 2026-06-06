@@ -3,8 +3,10 @@ import glob
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 import configparser
 import logging
@@ -19,10 +21,12 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton, QSpinBox, QCheckBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QSizePolicy, QComboBox,
-    QSplitter, QListWidget, QListWidgetItem,
+    QSplitter, QListWidget, QListWidgetItem, QScrollArea, QFrame,
+    QRadioButton, QButtonGroup, QGridLayout,
 )
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEvent
-from PyQt6.QtGui import QFont, QTextCursor, QColor, QIcon, QPixmap
+from PyQt6.QtCore import (QThread, QThreadPool, QRunnable,
+                          pyqtSignal, Qt, QTimer, QEvent, pyqtSlot, QObject)
+from PyQt6.QtGui import QFont, QTextCursor, QColor, QIcon, QPixmap, QPainter
 
 from vulncam import (
     VulnCam, check_config, check_linux_software,
@@ -48,6 +52,15 @@ TRANSLATIONS = {
         'label_ipgeo_key':    'IPGeo API Key (optional):',
         'group_playback':     'Playback',
         'label_max_proc':     'Max processes:',
+        'btn_view_list':      'List',
+        'btn_view_mosaic':    'Mosaic',
+        'thumb_small':        'Small',
+        'thumb_medium':       'Medium',
+        'thumb_large':        'Large',
+        'mosaic_connecting':  'Connecting...',
+        'mosaic_working':     'Working',
+        'mosaic_no_signal':   'No Signal',
+        'mosaic_waiting':     'Idle',
         'check_record':       'Record streams',
         'check_leave':        'Leave windows on finish',
         'check_only':         'Check only',
@@ -70,7 +83,6 @@ TRANSLATIONS = {
         'dlg_credits_title':    'Shodan credits',
         'dlg_credits_msg':      'Query credits: {}\nScan credits: {}',
         'dlg_credits_err':      'Could not retrieve credits. Check your API key.',
-        'log_all_results_page': 'Retrieved {} results so far...',
         'log_duplicate':        'Already listed, skipping: {}',
         'btn_restore':        'Restore defaults',
         'btn_start':          'START',
@@ -92,14 +104,19 @@ TRANSLATIONS = {
         'label_filter':       'Filter:',
         'filter_all':         'All',
         'filter_working':     'Working',
+        'filter_working_av':  'Working (AV)',
         'filter_failed':      'Failed',
         'filter_launching':   'Launching',
+        'label_thumb_timeout': 'Thumb (s):',
+        'check_discard':      'Discard not working',
         'btn_clear_streams':  'Clear',
         'btn_clear_failed':   'Clear failed',
         'btn_save_streams':   'Save',
         'btn_load_streams':   'Load',
         'btn_connect_all':      'Connect all',
         'btn_connect_selected': 'Connect selected',
+        'btn_scan':             'Scan',
+        'btn_scan_selected':    'Scan selected',
         'btn_stop_connect':     'Stop',
         'log_reconnect':      'Reconnecting: {}',
         'dlg_save_streams':   'Save stream list',
@@ -124,6 +141,15 @@ TRANSLATIONS = {
         'label_ipgeo_key':    'IPGeo API Key (opcional):',
         'group_playback':     'Reproducción',
         'label_max_proc':     'Máx procesos:',
+        'btn_view_list':      'Listado',
+        'btn_view_mosaic':    'Mosaico',
+        'thumb_small':        'Pequeño',
+        'thumb_medium':       'Mediano',
+        'thumb_large':        'Grande',
+        'mosaic_connecting':  'Conectando...',
+        'mosaic_working':     'Activo',
+        'mosaic_no_signal':   'Sin señal',
+        'mosaic_waiting':     'Idle',
         'check_record':       'Grabar streams',
         'check_leave':        'Dejar ventanas al terminar',
         'check_only':         'Solo verificar',
@@ -146,7 +172,6 @@ TRANSLATIONS = {
         'dlg_credits_title':    'Créditos Shodan',
         'dlg_credits_msg':      'Créditos de consulta: {}\nCréditos de escaneo: {}',
         'dlg_credits_err':      'No se pudieron obtener los créditos. Comprueba tu API key.',
-        'log_all_results_page': 'Obtenidos {} resultados hasta ahora...',
         'log_duplicate':        'Ya en el listado, omitiendo: {}',
         'btn_restore':        'Restaurar valores por defecto',
         'btn_start':          'START',
@@ -168,14 +193,19 @@ TRANSLATIONS = {
         'label_filter':       'Filtrar:',
         'filter_all':         'Todas',
         'filter_working':     'Activas',
+        'filter_working_av':  'Activas (AV)',
         'filter_failed':      'Fallidas',
         'filter_launching':   'Lanzando',
+        'label_thumb_timeout': 'Thumb (s):',
+        'check_discard':      'Descartar fallidos',
         'btn_clear_streams':  'Limpiar',
         'btn_clear_failed':   'Eliminar fallidos',
         'btn_save_streams':   'Guardar',
         'btn_load_streams':   'Cargar',
         'btn_connect_all':      'Conectar todas',
         'btn_connect_selected': 'Conectar seleccionadas',
+        'btn_scan':             'Escanear',
+        'btn_scan_selected':    'Escanear seleccionadas',
         'btn_stop_connect':     'Detener',
         'log_reconnect':      'Reconectando: {}',
         'dlg_save_streams':   'Guardar lista de streams',
@@ -190,11 +220,21 @@ TRANSLATIONS = {
     },
 }
 
+_COLOR_IDLE      = QColor('#707070')
 _COLOR_LAUNCHING = QColor('#E8A020')
 _COLOR_WORKING   = QColor('#20A050')
 _COLOR_FAILED    = QColor('#C03030')
 
 PROBE_DEFAULT = 10
+
+THUMB_SIZES = [
+    ('small',  160,  90),
+    ('medium', 240, 135),
+    ('large',  320, 180),
+]
+THUMB_W = 240
+THUMB_H = 135   # 16:9 medium (default)
+MAX_THUMB_RETRIES = 2
 
 QUERY_PRESETS = [
     ('RTSP + screenshot',  'RTSP has_screenshot:yes'),
@@ -263,6 +303,486 @@ def _detect_mpv():
     return None
 
 
+# ── Mosaic view ───────────────────────────────────────────────────────────────
+
+class MosaicCell(QFrame):
+    double_clicked = pyqtSignal(str, int, str)   # ip, port, title
+    clicked        = pyqtSignal(str, int)         # ip, port
+
+    def __init__(self, ip, port, title, connect_text, no_signal_text,
+                 waiting_text='Idle', working_text='Working',
+                 thumb_w=THUMB_W, thumb_h=THUMB_H, parent=None):
+        super().__init__(parent)
+        self._ip = ip
+        self._port = port
+        self._title = title
+        self._connect_text = connect_text
+        self._no_signal_text = no_signal_text
+        self._waiting_text = waiting_text
+        self._working_text = working_text
+        self._status = 'launching'
+        self._has_thumbnail = False
+        self._source_pixmap = None
+        self._thumb_retries = 0
+        self._selected = False
+        self._filter_hidden = False
+        self._thumb_w = thumb_w
+        self._thumb_h = thumb_h
+        self.setFixedWidth(thumb_w + 20)
+        self.setFrameShape(QFrame.Shape.Box)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        self._img_lbl = QLabel()
+        self._img_lbl.setFixedSize(thumb_w, thumb_h)
+        self._img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._img_lbl)
+        self._audio_badge = QLabel(self._img_lbl)
+        self._audio_badge.setStyleSheet(
+            'background: rgba(0,0,0,170); color: #ffffff;'
+            ' padding: 1px 4px; border-radius: 3px;'
+            ' font-size: 9px; font-weight: bold;')
+        self._audio_badge.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._audio_badge.setVisible(False)
+        self._title_lbl = QLabel()
+        self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._title_lbl.setWordWrap(True)
+        self._title_lbl.setFont(QFont('Monospace', 7))
+        layout.addWidget(self._title_lbl)
+        self._update_label(title)
+        self._refresh()
+
+    def _make_placeholder(self, text, color):
+        try:
+            px = QPixmap(self._thumb_w, self._thumb_h)
+            px.fill(QColor('#1a1a1a'))
+            p = QPainter(px)
+            p.setPen(color)
+            p.setFont(QFont('Sans', 11, QFont.Weight.Bold))
+            p.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, text)
+            p.end()
+            return px
+        except Exception as e:
+            print(f'MosaicCell._make_placeholder error: {e}', file=sys.stderr)
+            return QPixmap(self._thumb_w, self._thumb_h)
+
+    def _refresh(self):
+        if not self._has_thumbnail:
+            if self._status == 'waiting':
+                self._img_lbl.setPixmap(
+                    self._make_placeholder(self._waiting_text, QColor('#606060')))
+            elif self._status == 'launching':
+                self._img_lbl.setPixmap(
+                    self._make_placeholder(self._connect_text, _COLOR_LAUNCHING))
+            elif self._status == 'working':
+                self._img_lbl.setPixmap(
+                    self._make_placeholder(self._working_text, _COLOR_WORKING))
+            else:
+                self._img_lbl.setPixmap(
+                    self._make_placeholder(self._no_signal_text, _COLOR_FAILED))
+        c = {'waiting': '#404040', 'launching': '#E8A020',
+             'working': '#20A050', 'failed': '#C03030'}
+        col = c.get(self._status, '#E8A020')
+        bg = '#1e2a38' if self._selected else '#0d0d0d'
+        border = f'3px solid #ffffff' if self._selected else f'2px solid {col}'
+        self.setStyleSheet(
+            f'MosaicCell {{ border: {border}; border-radius: 4px;'
+            f' background: {bg}; }}'
+            f'QLabel {{ border: none; color: #dddddd; }}')
+
+    def set_selected(self, selected):
+        self._selected = selected
+        self._refresh()
+
+    def set_status(self, status):
+        self._status = status
+        self._refresh()
+
+    def set_thumbnail(self, pixmap):
+        self._has_thumbnail = True
+        self._source_pixmap = pixmap
+        self._render_thumbnail()
+        self._refresh()
+
+    def _render_thumbnail(self):
+        pixmap = self._source_pixmap
+        if pixmap is None:
+            return
+        w, h = self._thumb_w, self._thumb_h
+        try:
+            scaled = pixmap.scaled(w, h,
+                                   Qt.AspectRatioMode.KeepAspectRatio,
+                                   Qt.TransformationMode.SmoothTransformation)
+            final = QPixmap(w, h)
+            final.fill(QColor('#000000'))
+            p = QPainter(final)
+            p.drawPixmap((w - scaled.width()) // 2,
+                         (h - scaled.height()) // 2, scaled)
+            p.end()
+            self._img_lbl.setPixmap(final)
+        except Exception as e:
+            print(f'MosaicCell._render_thumbnail error: {e}', file=sys.stderr)
+            self._img_lbl.setPixmap(pixmap.scaled(
+                w, h, Qt.AspectRatioMode.KeepAspectRatio))
+
+    def set_audio_type(self, audio_type):
+        """Show badge 'V'/'AV' at bottom-right of thumbnail, or hide if None."""
+        if audio_type is None:
+            self._audio_badge.setVisible(False)
+            return
+        self._audio_badge.setText(audio_type)
+        self._audio_badge.adjustSize()
+        self._reposition_badge()
+        self._audio_badge.setVisible(True)
+        self._audio_badge.raise_()
+
+    def _reposition_badge(self):
+        b = self._audio_badge
+        b.move(self._thumb_w - b.width() - 4,
+               self._thumb_h - b.height() - 4)
+
+    def resize_thumb(self, w, h):
+        self._thumb_w = w
+        self._thumb_h = h
+        self.setFixedWidth(w + 20)
+        self._img_lbl.setFixedSize(w, h)
+        if self._audio_badge.isVisible():
+            self._reposition_badge()
+        if self._has_thumbnail:
+            self._render_thumbnail()
+        else:
+            self._refresh()
+
+    def _update_label(self, title):
+        self._title = title
+        try:
+            core = title.split('] ', 1)[1]
+            ip_port = core.split(' ')[0]
+            geo = core.split('(')[1].rstrip(')') if '(' in core else ''
+        except IndexError:
+            ip_port = f'{self._ip}:{self._port}'
+            geo = ''
+        self._title_lbl.setText(f'{ip_port}\n{geo}' if geo else ip_port)
+
+    def reset(self, keep_thumbnail=False):
+        """Reset cell to launching state. keep_thumbnail preserves existing image."""
+        if not keep_thumbnail:
+            self._has_thumbnail = False
+            self._source_pixmap = None
+        self._thumb_retries = 0
+        self._status = 'launching'
+        self._audio_badge.setVisible(False)
+        self._refresh()
+
+    def audio_type(self):
+        """Return the stored audio type ('V', 'AV') or None if not probed yet."""
+        if self._audio_badge.isVisible():
+            return self._audio_badge.text()
+        return None
+
+    def status(self):
+        return self._status
+
+    def has_thumbnail(self):
+        return self._has_thumbnail
+
+    def retranslate(self, connect_text, no_signal_text, waiting_text, working_text):
+        self._connect_text = connect_text
+        self._no_signal_text = no_signal_text
+        self._waiting_text = waiting_text
+        self._working_text = working_text
+        if not self._has_thumbnail:
+            self._refresh()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._ip, self._port)
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self.double_clicked.emit(self._ip, self._port, self._title)
+        super().mouseDoubleClickEvent(event)
+
+
+class MosaicGrid(QScrollArea):
+    cell_double_clicked = pyqtSignal(str, int, str)
+    selection_changed   = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self._container = QWidget()
+        self._container.setStyleSheet('background: #0a0a0a;')
+        self.setWidget(self._container)
+        self._glayout = QGridLayout(self._container)
+        self._glayout.setSpacing(8)
+        self._glayout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self._cells = {}         # (ip, port) → MosaicCell
+        self._order = []         # insertion order of (ip, port)
+        self._selected = set()   # set of (ip, port)
+        self._thumb_w = THUMB_W
+        self._thumb_h = THUMB_H
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(60)
+        self._timer.timeout.connect(self._do_relayout)
+
+    def add_cell(self, ip, port, title, connect_text, no_signal_text,
+                waiting_text='Idle', working_text='Working'):
+        key = (ip, port)
+        if key in self._cells:
+            return
+        cell = MosaicCell(ip, port, title, connect_text, no_signal_text,
+                          waiting_text, working_text,
+                          self._thumb_w, self._thumb_h,
+                          parent=self._container)
+        cell.double_clicked.connect(self.cell_double_clicked)
+        cell.clicked.connect(self._on_cell_clicked)
+        self._cells[key] = cell
+        self._order.append(key)
+        self._timer.start()
+
+    def _on_cell_clicked(self, ip, port):
+        key = (ip, port)
+        modifiers = QApplication.keyboardModifiers()
+        ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        if ctrl:
+            # Toggle this cell
+            if key in self._selected:
+                self._selected.discard(key)
+                self._cells[key].set_selected(False)
+            else:
+                self._selected.add(key)
+                self._cells[key].set_selected(True)
+        else:
+            # Single select: deselect all others
+            for k, c in self._cells.items():
+                c.set_selected(k == key)
+            self._selected = {key}
+        self.selection_changed.emit()
+
+    def selected_keys(self):
+        return list(self._selected)
+
+    def clear_selection(self):
+        for key in list(self._selected):
+            cell = self._cells.get(key)
+            if cell:
+                cell.set_selected(False)
+        self._selected.clear()
+        self.selection_changed.emit()
+
+    def remove_cell(self, ip, port):
+        key = (ip, port)
+        cell = self._cells.pop(key, None)
+        if cell:
+            self._order.remove(key)
+            self._selected.discard(key)
+            self._glayout.removeWidget(cell)
+            cell.deleteLater()
+            self._timer.start()
+
+    def get_cell(self, ip, port):
+        return self._cells.get((ip, port))
+
+    def set_cell_visible(self, ip, port, visible):
+        cell = self._cells.get((ip, port))
+        if cell:
+            cell._filter_hidden = not visible
+        self._timer.start()
+
+    def _do_relayout(self):
+        while self._glayout.count():
+            self._glayout.takeAt(0)
+        avail = self.viewport().width() - 16
+        cell_w = self._thumb_w + 20 + 8   # fixed cell width + spacing
+        cols = max(1, avail // cell_w)
+        row = col = 0
+        for key in self._order:
+            cell = self._cells.get(key)
+            if cell:
+                if not cell._filter_hidden:
+                    self._glayout.addWidget(cell, row, col)
+                    cell.show()
+                    col += 1
+                    if col >= cols:
+                        col = 0
+                        row += 1
+                else:
+                    cell.hide()
+        self._glayout.setRowStretch(row + 1, 1)
+
+    def set_thumb_size(self, w, h):
+        self._thumb_w = w
+        self._thumb_h = h
+        for cell in self._cells.values():
+            cell.resize_thumb(w, h)
+        self._timer.start()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._timer.start()
+
+
+# ── Thumbnail generation ───────────────────────────────────────────────────────
+
+class ThumbnailWorker(QThread):
+    done = pyqtSignal(str, int, str)   # ip, port, thumb_file_path ('' = failed)
+
+    def __init__(self, ip, port, mpv_path, thumb_dir, timeout):
+        super().__init__()
+        self._ip = ip
+        self._port = port
+        self._mpv_path = mpv_path
+        self._thumb_dir = thumb_dir
+        self._timeout = timeout
+        self._proc = None
+
+    def abort(self):
+        """Kill the MPV subprocess so run() exits immediately."""
+        if self._proc:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+
+    def run(self):
+        os.makedirs(self._thumb_dir, exist_ok=True)
+        thumb = os.path.join(self._thumb_dir, 'thumb.png')
+        cmd = [self._mpv_path, f'rtsp://{self._ip}:{self._port}',
+               f'-o={thumb}', '--ovc=png', '--frames=1',
+               '--really-quiet', '--no-terminal']
+        # Strip display vars so MPV cannot open any window even if a
+        # display is already active (e.g. other MPV windows are open)
+        env = os.environ.copy()
+        if sys.platform == 'linux':
+            env.pop('DISPLAY', None)
+            env.pop('WAYLAND_DISPLAY', None)
+        try:
+            self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.DEVNULL, env=env)
+            try:
+                self._proc.wait(timeout=self._timeout)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self.done.emit(self._ip, self._port, '')
+                return
+            if os.path.isfile(thumb) and os.path.getsize(thumb) > 0:
+                self.done.emit(self._ip, self._port, thumb)
+                return
+        except Exception:
+            pass
+        finally:
+            self._proc = None
+        self.done.emit(self._ip, self._port, '')
+
+
+class ThumbnailManager(QObject):
+    thumbnail_ready = pyqtSignal(str, int, object)  # ip, port, QPixmap|None
+
+    def __init__(self, temp_dir, get_max_workers, parent=None):
+        super().__init__(parent)
+        self._temp_dir = temp_dir
+        self._get_max_workers = get_max_workers
+        self._queue = []    # [(ip, port, mpv_path, timeout)]
+        self._active = {}   # (ip, port) → ThumbnailWorker
+
+    def add(self, ip, port, mpv_path, timeout):
+        key = (ip, port)
+        if key in self._active or any(q[0] == ip and q[1] == port
+                                       for q in self._queue):
+            return
+        self._queue.append((ip, port, mpv_path, timeout))
+        self._process_queue()
+
+    def _process_queue(self):
+        max_w = self._get_max_workers()
+        while self._queue and len(self._active) < max_w:
+            ip, port, mpv_path, timeout = self._queue.pop(0)
+            thumb_dir = os.path.join(self._temp_dir, f'{ip}_{port}')
+            w = ThumbnailWorker(ip, port, mpv_path, thumb_dir, timeout)
+            w.done.connect(self._worker_done)
+            # Keep strong Python reference until after finished fires
+            w.finished.connect(lambda worker=w: self._thumb_worker_finished(worker))
+            self._active[(ip, port)] = w
+            w.start()
+
+    def _thumb_worker_finished(self, worker):
+        """Called after the thread has fully stopped; safe to delete."""
+        worker.deleteLater()
+
+    @pyqtSlot(str, int, str)
+    def _worker_done(self, ip, port, file_path):
+        self._active.pop((ip, port), None)
+        pixmap = None
+        if file_path:
+            px = QPixmap(file_path)
+            pixmap = px if not px.isNull() else None
+        self.thumbnail_ready.emit(ip, port, pixmap)
+        self._process_queue()
+
+    def stop(self):
+        self._queue.clear()
+        workers = list(self._active.values())
+        self._active.clear()   # stop tracking; workers kept alive by local list
+        for w in workers:
+            w.abort()
+        for w in workers:
+            w.wait(2000)       # generous: abort() kills MPV so thread exits fast
+
+
+# ── Audio detection via RTSP DESCRIBE ─────────────────────────────────────────
+
+def _probe_audio(ip, port, timeout=3):
+    """RTSP DESCRIBE to detect audio track. Returns 'AV', 'V', or None on failure."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            req = (f'DESCRIBE rtsp://{ip}:{port}/ RTSP/1.0\r\n'
+                   f'CSeq: 1\r\nAccept: application/sdp\r\n'
+                   f'User-Agent: VulnCam/1.0\r\n\r\n')
+            s.sendall(req.encode())
+            data = b''
+            while len(data) < 8192:
+                try:
+                    chunk = s.recv(2048)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if b'\r\n\r\n' in data:
+                        hdr_end = data.index(b'\r\n\r\n') + 4
+                        cl = 0
+                        for line in data[:hdr_end].decode('utf-8', errors='ignore').splitlines():
+                            if line.lower().startswith('content-length:'):
+                                cl = int(line.split(':', 1)[1].strip())
+                                break
+                        if cl == 0 or len(data) - hdr_end >= cl:
+                            break
+                except socket.timeout:
+                    break
+        return 'AV' if b'm=audio' in data else 'V'
+    except Exception:
+        return None
+
+
+class AudioProbeTask(QRunnable):
+    class Signals(QObject):
+        done = pyqtSignal(str, int, str)   # ip, port, 'V'|'AV'
+
+    def __init__(self, ip, port):
+        super().__init__()
+        self.signals = self.Signals()
+        self._ip = ip
+        self._port = port
+        self.setAutoDelete(True)
+
+    def run(self):
+        result = _probe_audio(self._ip, self._port)
+        self.signals.done.emit(self._ip, self._port, result or 'V')
+
+
 class GUIVulnCam(VulnCam):
     """VulnCam for GUI: no signal.signal setup, no sys.exit, status callbacks."""
 
@@ -278,14 +798,19 @@ class GUIVulnCam(VulnCam):
         self._last_geo_request = 0.0
         self.api = shodan.Shodan(config[REQUIRED_SECTION]['shodanapikey'])
         self._known_pids      = set()
-        self.check_only    = args.check_only
-        self.probe_seconds = args.probe_seconds
-        self.on_stream_added    = None
-        self.on_stream_status   = None
-        self.should_skip_stream = None   # (ip, port) -> bool
-        self.on_stream_skipped  = None   # (label: str) -> None
-        self.on_stats_update    = None   # (procs: int, wins: int) -> None
-        self.get_max_processes  = None   # () -> int
+        self.check_only        = args.check_only
+        self.probe_seconds     = args.probe_seconds
+        self.generate_mosaic   = getattr(args, 'generate_mosaic', False)
+        self.thumb_timeout     = getattr(args, 'thumb_timeout', DEFAULT_TIMEOUT)
+        self.thumb_base_dir    = None    # set by worker before run()
+        self.on_stream_added       = None
+        self.on_stream_status      = None
+        self.on_window_opened      = None   # (pid) → called when live MPV window appears
+        self.on_thumbnail_generated = None  # (ip, port, file_path) -> None
+        self.should_skip_stream    = None
+        self.on_stream_skipped     = None
+        self.on_stats_update       = None
+        self.get_max_processes     = None
 
     def _sigint_handler(self, _signum, _frame):
         self.signal_received = True
@@ -298,8 +823,8 @@ class GUIVulnCam(VulnCam):
                 self.processes.pop(pid, None)
 
     def _active_processes(self):
-        if self.check_only:
-            # In check-only mode, just count; _check_working handles cleanup
+        if self.check_only or self.generate_mosaic:
+            # Silent modes: just count; _check_working handles cleanup
             return sum(1 for info in self.processes.values()
                        if info['process'].poll() is None)
         cnt = 0
@@ -356,6 +881,50 @@ class GUIVulnCam(VulnCam):
                 self.on_stats_update(len(self.processes), 0)
             return 0  # no visible windows in check-only mode
 
+        if self.generate_mosaic:
+            now = time.time()
+            for pid in list(self.processes):
+                info = self.processes[pid]
+                ret = info['process'].poll()
+                if ret is not None:
+                    self.processes.pop(pid)
+                    thumb_dir = info.get('thumb_dir', '')
+                    # MPV may exit non-zero even when the frame was saved;
+                    # check file existence rather than relying on exit code.
+                    thumb_file = None
+                    if thumb_dir:
+                        # Encode mode outputs thumb.png; fallback for old --vo=image names
+                        for name in ('thumb.png', '00000001.png',
+                                     '00000001.jpg', '00000001.webp'):
+                            candidate = os.path.join(thumb_dir, name)
+                            if os.path.isfile(candidate) \
+                                    and os.path.getsize(candidate) > 0:
+                                thumb_file = candidate
+                                break
+                    _vulncam_logger.debug(
+                        '%s thumbnail exit=%s file=%s', info['title'], ret,
+                        thumb_file or 'none')
+                    if thumb_file:
+                        if self.on_stream_status:
+                            self.on_stream_status(info['title'], 'working')
+                        if self.on_thumbnail_generated:
+                            self.on_thumbnail_generated(
+                                info['ip'], info['port'], thumb_file)
+                    else:
+                        if self.on_stream_status:
+                            self.on_stream_status(info['title'], 'failed')
+                elif (now - info['launch_time']) > (self.thumb_timeout + 5):
+                    try:
+                        info['process'].kill()
+                    except Exception:
+                        pass
+                    self.processes.pop(pid)
+                    if self.on_stream_status:
+                        self.on_stream_status(info['title'], 'failed')
+            if self.on_stats_update:
+                self.on_stats_update(len(self.processes), 0)
+            return 0
+
         current_windows = _get_open_windows()
         now = time.time()
         cnt_working = 0
@@ -366,6 +935,8 @@ class GUIVulnCam(VulnCam):
                     _vulncam_logger.debug('%s is working :)', title)
                     if self.on_stream_status:
                         self.on_stream_status(title, 'working')
+                    if self.on_window_opened:
+                        self.on_window_opened(pid)
                 self.processes[pid]['working'] = True
                 cnt_working += 1
             elif (now - self.processes[pid]['launch_time']) >= DEFAULT_TIMEOUT:
@@ -496,12 +1067,22 @@ class GUIVulnCam(VulnCam):
             location = self._get_geo_info(match[0])
             title = '[%d] %s:%d (%s-%s-%s)' % tuple((idx + 1,) + match + location)
             _vulncam_logger.info(title)
+            thumb_dir = None
             if self.check_only:
                 cmd = [mpv_path,
                        '--vo=null', '--ao=null',
                        '--end=%d' % self.probe_seconds,
-                       '--really-quiet',
+                       '--really-quiet', '--no-terminal', '--force-window=no',
                        'rtsp://%s:%d' % match]
+            elif self.generate_mosaic:
+                thumb_dir = os.path.join(
+                    self.thumb_base_dir or '', f'{match[0]}_{match[1]}')
+                os.makedirs(thumb_dir, exist_ok=True)
+                thumb_file_path = os.path.join(thumb_dir, 'thumb.png')
+                cmd = [mpv_path, f'rtsp://{match[0]}:{match[1]}',
+                       f'-o={thumb_file_path}', '--ovc=png', '--frames=1',
+                       '--really-quiet', '--no-terminal',
+                       f'--end={self.thumb_timeout}']
             elif self.stream_record:
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 mkv_file = '%s_%d.mkv' % (ts, idx + 1)
@@ -511,22 +1092,32 @@ class GUIVulnCam(VulnCam):
             else:
                 cmd = [mpv_path, f'--title={title}',
                        'rtsp://%s:%d' % match, '--mute=yes']
-            if sys.platform == 'linux':
+            if not self.check_only and not self.generate_mosaic \
+                    and sys.platform == 'linux':
                 cmd.append('--gpu-context=x11egl')
+            popen_env = None
+            if self.generate_mosaic and sys.platform == 'linux':
+                popen_env = os.environ.copy()
+                popen_env.pop('DISPLAY', None)
+                popen_env.pop('WAYLAND_DISPLAY', None)
             mpv_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.STDOUT)
+                                        stderr=subprocess.STDOUT,
+                                        env=popen_env)
             self.processes[mpv_proc.pid] = {
                 'process': mpv_proc,
                 'title': title,
                 'launch_time': time.time(),
                 'working': False,
+                'ip': match[0],
+                'port': match[1],
+                'thumb_dir': thumb_dir,
             }
             time.sleep(0.2)
             self._check_working()  # detect new PID immediately → on_stream_added
 
         if self.signal_received:
             return
-        if not self.check_only and self.leave_windows:
+        if not self.check_only and not self.generate_mosaic and self.leave_windows:
             while not self.signal_received and \
                     self._active_processes() > self._check_working():
                 time.sleep(1)
@@ -548,21 +1139,25 @@ class _QtLogHandler(logging.Handler):
 
 
 class VulnCamWorker(QThread):
-    log_message    = pyqtSignal(str)
-    finished       = pyqtSignal()
-    error          = pyqtSignal(str)
-    stream_added   = pyqtSignal(str)
-    stream_status  = pyqtSignal(str, str)
-    stream_skipped = pyqtSignal(str)
-    stats_update   = pyqtSignal(int, int)   # active_procs, active_windows
+    log_message         = pyqtSignal(str)
+    finished            = pyqtSignal()
+    error               = pyqtSignal(str)
+    stream_added        = pyqtSignal(str)
+    stream_status       = pyqtSignal(str, str)
+    stream_skipped      = pyqtSignal(str)
+    stats_update        = pyqtSignal(int, int)
+    thumbnail_generated = pyqtSignal(str, int, str)  # ip, port, file_path
+    window_opened       = pyqtSignal(int)             # pid
 
-    def __init__(self, config, args, matches=None, skip_fn=None, max_procs_ref=None):
+    def __init__(self, config, args, matches=None, skip_fn=None,
+                 max_procs_ref=None, thumb_base_dir=None):
         super().__init__()
-        self.config        = config
-        self.args          = args
-        self.matches       = matches
-        self.skip_fn       = skip_fn
-        self.max_procs_ref = max_procs_ref
+        self.config         = config
+        self.args           = args
+        self.matches        = matches
+        self.skip_fn        = skip_fn
+        self.max_procs_ref  = max_procs_ref
+        self.thumb_base_dir = thumb_base_dir
         self.vulncam = None
         self._handler = None
 
@@ -573,11 +1168,14 @@ class VulnCamWorker(QThread):
         _vulncam_logger.setLevel(logging.DEBUG if self.args.verbose else logging.INFO)
         try:
             self.vulncam = GUIVulnCam(self.config, self.args)
-            self.vulncam.on_stream_added    = self.stream_added.emit
-            self.vulncam.on_stream_status   = self.stream_status.emit
-            self.vulncam.should_skip_stream = self.skip_fn
-            self.vulncam.on_stream_skipped  = self.stream_skipped.emit
-            self.vulncam.on_stats_update    = self.stats_update.emit
+            self.vulncam.on_stream_added        = self.stream_added.emit
+            self.vulncam.on_stream_status       = self.stream_status.emit
+            self.vulncam.should_skip_stream     = self.skip_fn
+            self.vulncam.on_stream_skipped      = self.stream_skipped.emit
+            self.vulncam.on_stats_update        = self.stats_update.emit
+            self.vulncam.on_window_opened       = self.window_opened.emit
+            self.vulncam.on_thumbnail_generated = self.thumbnail_generated.emit
+            self.vulncam.thumb_base_dir         = self.thumb_base_dir
             if self.max_procs_ref:
                 self.vulncam.get_max_processes = lambda: self.max_procs_ref[0]
             if self.matches is not None:
@@ -602,14 +1200,42 @@ class VulnCamWindow(QMainWindow):
         super().__init__()
         self._lang = 'en'
         self.worker = None
-        self._stream_items = {}   # key: (ip, port) → QListWidgetItem
+        self._stream_items = {}    # (ip, port) → QListWidgetItem
+        self._mosaic_cells = {}    # (ip, port) → MosaicCell
+        self._audio_probes  = {}   # (ip, port) → AudioProbeTask.Signals
+        self._worker_refs   = []   # keep-alive: holds Python refs to workers until finished
+        self._live_mpv_pids = set()
+        self._live_mpv_timer = QTimer(self)
+        self._live_mpv_timer.setInterval(1000)
+        self._live_mpv_timer.timeout.connect(self._poll_live_mpv)
         self._search_start_time = 0.0
-        self._running_source = None   # 'shodan' | 'connect_all'
-        self._last_stats = (0, 0)     # (active_procs, active_wins)
-        self._reconnect_pids = set()  # PIDs launched via double-click
+        self._running_source = None   # 'shodan' | 'connect_all' | 'connect_selected'
+        self._last_stats = (0, 0)
+        self._reconnect_pids = set()
+        self._temp_dir = tempfile.mkdtemp(prefix='vulncam_thumbs_')
+        self._thumb_manager = ThumbnailManager(
+            self._temp_dir, lambda: self.max_proc_spin.value(), self)
+        self._thumb_manager.thumbnail_ready.connect(self._on_thumbnail_ready)
         self._setup_ui()
         self.config_combo.currentTextChanged.connect(self._on_config_selected)
         self._populate_ini_combo()
+
+    def closeEvent(self, event):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(5000)
+        for w in list(self._worker_refs):
+            if w.isRunning():
+                w.stop()
+                w.wait(3000)
+        self._worker_refs.clear()
+        self._live_mpv_timer.stop()
+        self._live_mpv_pids.clear()
+        self._thumb_manager.stop()
+        QThreadPool.globalInstance().waitForDone(4000)
+        self._audio_probes.clear()
+        shutil.rmtree(self._temp_dir, ignore_errors=True)
+        super().closeEvent(event)
 
     def _t(self, key):
         return TRANSLATIONS[self._lang][key]
@@ -620,23 +1246,13 @@ class VulnCamWindow(QMainWindow):
         self.setMinimumWidth(900)
         QTimer.singleShot(0, self._fit_initial_size)
         QTimer.singleShot(0, self._autofill_mpv_if_empty)
+        QTimer.singleShot(0, lambda: self._on_view_mode_changed(None, True))
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setSpacing(8)
 
-        # Language row
-        lang_row = QHBoxLayout()
-        lang_row.addStretch()
-        self._lang_label = QLabel()
-        lang_row.addWidget(self._lang_label)
-        self._lang_combo = QComboBox()
-        self._lang_combo.addItem('English', 'en')
-        self._lang_combo.addItem('Español', 'es')
-        self._lang_combo.currentIndexChanged.connect(self._on_lang_changed)
-        lang_row.addWidget(self._lang_combo)
-        root.addLayout(lang_row)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
@@ -648,6 +1264,17 @@ class VulnCamWindow(QMainWindow):
 
         self._cfg_group = QGroupBox()
         cfg_layout = QVBoxLayout(self._cfg_group)
+
+        lang_row = QHBoxLayout()
+        self._lang_label = QLabel()
+        lang_row.addWidget(self._lang_label)
+        self._lang_combo = QComboBox()
+        self._lang_combo.addItem('English', 'en')
+        self._lang_combo.addItem('Español', 'es')
+        self._lang_combo.currentIndexChanged.connect(self._on_lang_changed)
+        lang_row.addWidget(self._lang_combo)
+        lang_row.addStretch()
+        cfg_layout.addLayout(lang_row)
 
         cfg_file_row = QHBoxLayout()
         self._label_config_file = QLabel()
@@ -675,6 +1302,7 @@ class VulnCamWindow(QMainWindow):
         self._label_mpv = QLabel()
         mpv_row.addWidget(self._label_mpv)
         self.mpv_path = QLineEdit()
+        self.mpv_path.editingFinished.connect(self._check_mpv_path_field)
         mpv_row.addWidget(self.mpv_path)
         self._browse_mpv_btn = QPushButton()
         self._browse_mpv_btn.clicked.connect(self._browse_mpv)
@@ -706,6 +1334,8 @@ class VulnCamWindow(QMainWindow):
         self.max_proc_spin.setValue(DEFAULT_MAX_PROCS)
         pb_num_row.addWidget(self.max_proc_spin)
         pb_num_row.addStretch()
+        self._stats_label = QLabel()
+        pb_num_row.addWidget(self._stats_label)
         pb_layout.addLayout(pb_num_row)
         self.max_proc_spin.valueChanged.connect(lambda _: self._refresh_stats_label())
 
@@ -726,20 +1356,20 @@ class VulnCamWindow(QMainWindow):
         self._probe_spin = QSpinBox()
         self._probe_spin.setRange(5, 60)
         self._probe_spin.setValue(PROBE_DEFAULT)
-        self._probe_spin.setEnabled(False)
+        self._probe_spin.setEnabled(True)
         pb_scan_row.addWidget(self._probe_spin)
         pb_scan_row.addStretch()
+        self._label_thumb_timeout = QLabel()
+        pb_scan_row.addWidget(self._label_thumb_timeout)
+        self._thumb_timeout_spin = QSpinBox()
+        self._thumb_timeout_spin.setRange(5, 60)
+        self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
+        pb_scan_row.addWidget(self._thumb_timeout_spin)
+        self._check_only_check.setChecked(True)
         self._check_only_check.toggled.connect(self._probe_spin.setEnabled)
         self._check_only_check.toggled.connect(self._label_probe.setEnabled)
         pb_layout.addLayout(pb_scan_row)
 
-        pb_stats_row = QHBoxLayout()
-        pb_stats_row.addStretch()
-        self._stats_label = QLabel()
-        pb_stats_row.addWidget(self._stats_label)
-        pb_layout.addLayout(pb_stats_row)
-
-        ll.addWidget(self._playback_group)
 
         # ── Shodan search group ───────────────────────────────────────────────
         self._search_group = QGroupBox()
@@ -859,23 +1489,47 @@ class VulnCamWindow(QMainWindow):
         self._streams_group = QGroupBox()
         sg_layout = QVBoxLayout(self._streams_group)
 
-        filter_row = QHBoxLayout()
+        # View mode toggle (list / mosaic)
+        view_row = QHBoxLayout()
+        self._view_btn_group = QButtonGroup(self)
+        self._mosaic_radio = QRadioButton()
+        self._list_radio = QRadioButton()
+        self._mosaic_radio.setChecked(True)
+        self._view_btn_group.addButton(self._mosaic_radio)
+        self._view_btn_group.addButton(self._list_radio)
+        view_row.addWidget(self._mosaic_radio)
+        view_row.addWidget(self._list_radio)
+        self._thumb_size_combo = QComboBox()
+        for key, w, h in THUMB_SIZES:
+            self._thumb_size_combo.addItem('', (w, h))
+        self._thumb_size_combo.setCurrentIndex(1)  # medium
+        self._thumb_size_combo.setVisible(False)
+        self._thumb_size_combo.currentIndexChanged.connect(self._on_thumb_size_changed)
+        view_row.addWidget(self._thumb_size_combo)
+        view_row.addSpacing(12)
         self._label_filter = QLabel()
-        filter_row.addWidget(self._label_filter)
+        view_row.addWidget(self._label_filter)
         self._filter_combo = QComboBox()
         self._filter_combo.addItem('', 'all')
         self._filter_combo.addItem('', 'working')
+        self._filter_combo.addItem('', 'working_av')
         self._filter_combo.addItem('', 'failed')
         self._filter_combo.addItem('', 'launching')
+        self._filter_combo.setCurrentIndex(1)
         self._filter_combo.currentIndexChanged.connect(self._apply_filter)
-        filter_row.addWidget(self._filter_combo)
-        filter_row.addStretch()
+        view_row.addWidget(self._filter_combo)
+        view_row.addStretch()
         self._count_label = QLabel()
-        filter_row.addWidget(self._count_label)
-        sg_layout.addLayout(filter_row)
+        view_row.addWidget(self._count_label)
+        sg_layout.addLayout(view_row)
+        self._view_btn_group.buttonToggled.connect(self._on_view_mode_changed)
 
         # Row 1: data management actions
         actions_row1 = QHBoxLayout()
+        self._discard_check = QCheckBox()
+        self._discard_check.setChecked(False)
+        actions_row1.addWidget(self._discard_check)
+        actions_row1.addStretch()
         self._clear_btn = QPushButton()
         self._clear_btn.clicked.connect(self._clear_streams)
         self._clear_failed_btn = QPushButton()
@@ -895,7 +1549,14 @@ class VulnCamWindow(QMainWindow):
         self._connect_btn.clicked.connect(self._on_connect_btn_clicked)
         self._connect_selected_btn = QPushButton()
         self._connect_selected_btn.clicked.connect(self._on_connect_selected_clicked)
-        for w in (self._connect_btn, self._connect_selected_btn):
+        self._scan_btn = QPushButton()
+        self._scan_btn.setVisible(False)
+        self._scan_btn.clicked.connect(self._on_scan_btn_clicked)
+        self._scan_selected_btn = QPushButton()
+        self._scan_selected_btn.setVisible(False)
+        self._scan_selected_btn.clicked.connect(self._on_scan_selected_btn_clicked)
+        for w in (self._connect_btn, self._connect_selected_btn,
+                  self._scan_btn, self._scan_selected_btn):
             actions_row2.addWidget(w)
         actions_row2.addStretch()
         sg_layout.addLayout(actions_row2)
@@ -909,6 +1570,15 @@ class VulnCamWindow(QMainWindow):
         self._streams_list.installEventFilter(self)
         sg_layout.addWidget(self._streams_list)
 
+        self._mosaic_grid = MosaicGrid()
+        self._mosaic_grid.cell_double_clicked.connect(
+            self._on_mosaic_cell_double_clicked)
+        self._mosaic_grid.setVisible(False)
+        self._mosaic_grid.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._mosaic_grid.installEventFilter(self)
+        sg_layout.addWidget(self._mosaic_grid)
+
+        rl.addWidget(self._playback_group)
         rl.addWidget(self._streams_group)
 
         splitter.addWidget(left)
@@ -939,6 +1609,7 @@ class VulnCamWindow(QMainWindow):
         self.leave_check.setText(t['check_leave'])
         self._check_only_check.setText(t['check_only'])
         self._label_probe.setText(t['label_probe'])
+        self._label_thumb_timeout.setText(t['label_thumb_timeout'])
         self._dedup_check.setText(t['check_dedup'])
         self._search_group.setTitle(t['group_search'])
         self._label_query.setText(t['label_query'])
@@ -961,14 +1632,26 @@ class VulnCamWindow(QMainWindow):
         self._label_filter.setText(t['label_filter'])
         self._filter_combo.setItemText(0, t['filter_all'])
         self._filter_combo.setItemText(1, t['filter_working'])
-        self._filter_combo.setItemText(2, t['filter_failed'])
-        self._filter_combo.setItemText(3, t['filter_launching'])
+        self._filter_combo.setItemText(2, t['filter_working_av'])
+        self._filter_combo.setItemText(3, t['filter_failed'])
+        self._filter_combo.setItemText(4, t['filter_launching'])
+        self._discard_check.setText(t['check_discard'])
         self._clear_btn.setText(t['btn_clear_streams'])
         self._clear_failed_btn.setText(t['btn_clear_failed'])
         self._save_streams_btn.setText(t['btn_save_streams'])
         self._load_streams_btn.setText(t['btn_load_streams'])
         self._connect_btn.setText(t['btn_connect_all'])
         self._connect_selected_btn.setText(t['btn_connect_selected'])
+        self._scan_btn.setText(t['btn_scan'])
+        self._scan_selected_btn.setText(t['btn_scan_selected'])
+        self._list_radio.setText(t['btn_view_list'])
+        self._mosaic_radio.setText(t['btn_view_mosaic'])
+        for i, key in enumerate(('thumb_small', 'thumb_medium', 'thumb_large')):
+            self._thumb_size_combo.setItemText(i, t[key])
+        # Retranslate placeholder text in existing mosaic cells
+        for cell in self._mosaic_cells.values():
+            cell.retranslate(t['mosaic_connecting'], t['mosaic_no_signal'],
+                             t['mosaic_waiting'], t['mosaic_working'])
         self._update_count()
 
     def _fit_initial_size(self):
@@ -1027,10 +1710,30 @@ class VulnCamWindow(QMainWindow):
                 self.config_combo.addItem(path)
             self.config_combo.setCurrentText(path)
 
+    def _check_mpv_path_field(self):
+        """Validate the MPV path field visually: green=OK, red=not found."""
+        path = self.mpv_path.text().strip()
+        if not path:
+            self.mpv_path.setStyleSheet('')
+            return
+        valid = bool(os.path.isfile(path) or shutil.which(path))
+        if valid:
+            self.mpv_path.setStyleSheet('color: #20A050;')
+        else:
+            # Path not found — try auto-detect
+            detected = _detect_mpv()
+            if detected:
+                self.mpv_path.setText(detected)
+                self.mpv_path.setStyleSheet('color: #20A050;')
+                self._append_log(self._t('log_mpv_detected').format(detected))
+            else:
+                self.mpv_path.setStyleSheet('color: #C03030;')
+
     def _browse_mpv(self):
         path, _ = QFileDialog.getOpenFileName(self, self._t('dlg_select_mpv'), '')
         if path:
             self.mpv_path.setText(path)
+            self._check_mpv_path_field()
 
     def _on_detect_mpv(self):
         """Manual detect button: find MPV and fill the field, inform the user."""
@@ -1042,6 +1745,7 @@ class VulnCamWindow(QMainWindow):
             self._append_log(self._t('log_mpv_not_found'))
             QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
                                 self._t('dlg_mpv_missing'))
+        self._check_mpv_path_field()
 
     def _autofill_mpv_if_empty(self):
         """Silently fill MPV path on startup if the field is empty."""
@@ -1050,6 +1754,7 @@ class VulnCamWindow(QMainWindow):
             if found:
                 self.mpv_path.setText(found)
                 self._append_log(self._t('log_mpv_detected').format(found))
+        self._check_mpv_path_field()
 
     def _load_config(self, path):
         config = configparser.ConfigParser()
@@ -1060,7 +1765,7 @@ class VulnCamWindow(QMainWindow):
             self.mpv_path.setText(config[REQUIRED_SECTION]['mpvfilepath'])
         if config.has_option(OPTIONAL_SECTION, 'ipgeoapikey'):
             self.ipgeo_key.setText(config[OPTIONAL_SECTION]['ipgeoapikey'])
-        self._autofill_mpv_if_empty()
+        self._autofill_mpv_if_empty()   # fills if empty, then validates
 
     def _build_config(self):
         config = configparser.ConfigParser()
@@ -1081,6 +1786,7 @@ class VulnCamWindow(QMainWindow):
     def _restore_defaults(self):
         self.shodan_key.clear()
         self.mpv_path.clear()
+        self.mpv_path.setStyleSheet('')
         self.ipgeo_key.clear()
         self.query_field.setText(DEFAULT_QUERY)
         self._preset_combo.setCurrentIndex(0)
@@ -1093,8 +1799,11 @@ class VulnCamWindow(QMainWindow):
         self.leave_check.setChecked(False)
         self.allres_check.setChecked(False)
         self._dedup_check.setChecked(True)
-        self._check_only_check.setChecked(False)
+        self._check_only_check.setChecked(True)
         self._probe_spin.setValue(PROBE_DEFAULT)
+        self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
+        self._discard_check.setChecked(False)
+        self._filter_combo.setCurrentIndex(1)
         self._autofill_mpv_if_empty()
 
     def _ensure_mpv_path(self):
@@ -1158,6 +1867,29 @@ class VulnCamWindow(QMainWindow):
                 self._stream_items[key] = item
             self._streams_list.addItem(item)
 
+        # Mosaic: create cell if new stream
+        if key and key not in self._mosaic_cells:
+            t = TRANSLATIONS[self._lang]
+            self._mosaic_grid.add_cell(ip, port, title,
+                                       t['mosaic_connecting'], t['mosaic_no_signal'],
+                                       t['mosaic_waiting'], t['mosaic_working'])
+            self._mosaic_cells[key] = self._mosaic_grid.get_cell(ip, port)
+            # Queue thumbnail only if no worker is running (avoid competing MPV processes)
+            if self._mosaic_radio.isChecked() and self._running_source is None:
+                mpv = self.mpv_path.text().strip()
+                if mpv:
+                    self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+        elif key and key in self._mosaic_cells:
+            regenerating = self._running_source in ('shodan', 'scan_all', 'scan_selected')
+            if regenerating:
+                self._mosaic_cells[key].reset(keep_thumbnail=False)
+            else:
+                # Live connection (connect_all / connect_selected): keep thumbnail
+                # and current status — only clear the audio badge so it re-probes
+                cell = self._mosaic_cells[key]
+                cell._thumb_retries = 0
+                cell.set_audio_type(None)
+
         self._apply_filter()
         if not item.isHidden():
             self._streams_list.scrollToItem(item)
@@ -1166,10 +1898,59 @@ class VulnCamWindow(QMainWindow):
         ip, port = self._parse_ip_port(title)
         if ip is None:
             return
-        item = self._stream_items.get((ip, port))
+        key = (ip, port)
+        item = self._stream_items.get(key)
         if item:
+            if status == 'failed' and self._discard_check.isChecked():
+                self._remove_stream(key, item)
+                self._update_count()
+                return
             item.setForeground(_COLOR_WORKING if status == 'working' else _COLOR_FAILED)
             self._apply_filter()
+        cell = self._mosaic_cells.get((ip, port))
+        if cell and not cell.has_thumbnail():
+            mosaic_run_active = (self._mosaic_radio.isChecked()
+                                 and self._running_source is not None)
+            if status == 'failed' and self._mosaic_radio.isChecked() \
+                    and not mosaic_run_active:
+                # Worker reported failure → retry via ThumbnailManager
+                self._retry_or_fail_thumbnail(ip, port, cell)
+            elif status == 'working' and self._mosaic_radio.isChecked() \
+                    and self._running_source is None:
+                # Stream confirmed working with no active run (e.g. double-click) →
+                # now safe to capture thumbnail (no competing MPV window process)
+                cell.set_status(status)
+                mpv = self.mpv_path.text().strip()
+                if mpv:
+                    self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+            else:
+                cell.set_status(status)
+        if status == 'working':
+            self._launch_audio_probe(ip, port)
+
+    def _launch_audio_probe(self, ip, port):
+        key = (ip, port)
+        if key in self._audio_probes:
+            return
+        task = AudioProbeTask(ip, port)
+        task.signals.done.connect(self._on_audio_probe_done)
+        self._audio_probes[key] = task.signals   # keep Signals alive until done
+        QThreadPool.globalInstance().start(task)
+
+    @pyqtSlot(str, int, str)
+    def _on_audio_probe_done(self, ip, port, result):
+        key = (ip, port)
+        self._audio_probes.pop(key, None)
+        item = self._stream_items.get(key)
+        if item:
+            text = item.text()
+            for badge in (' · V', ' · AV'):
+                text = text.replace(badge, '')
+            item.setText(text + f' · {result}')
+            self._apply_filter()
+        cell = self._mosaic_cells.get(key)
+        if cell:
+            cell.set_audio_type(result)
 
     def _on_stream_double_clicked(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)
@@ -1198,7 +1979,6 @@ class VulnCamWindow(QMainWindow):
             return
         # Only set orange (and log) once we know the process started
         item.setForeground(_COLOR_LAUNCHING)
-        self._apply_filter()
         self._append_log(self._t('log_reconnect').format(title))
         self._reconnect_pids.add(proc.pid)
         self._refresh_stats_label()
@@ -1210,6 +1990,8 @@ class VulnCamWindow(QMainWindow):
 
         def _finish(status):
             self._reconnect_pids.discard(pid)
+            if status == 'working':
+                self._add_live_mpv_pid(pid)
             self._refresh_stats_label()
             self._on_stream_status(title, status)
 
@@ -1243,34 +2025,50 @@ class VulnCamWindow(QMainWindow):
     def _apply_filter(self, _index=None):
         fval = self._filter_combo.currentData()
         color_map = {
-            'working':  _COLOR_WORKING,
-            'failed':   _COLOR_FAILED,
-            'launching': _COLOR_LAUNCHING,
+            'working':    _COLOR_WORKING,
+            'working_av': _COLOR_WORKING,
+            'failed':     _COLOR_FAILED,
+            'launching':  _COLOR_LAUNCHING,
         }
         target = color_map.get(fval)
         for i in range(self._streams_list.count()):
             item = self._streams_list.item(i)
-            if fval == 'all' or target is None:
-                item.setHidden(False)
+            if fval == 'all':
+                hidden = False
+            elif fval == 'working_av':
+                hidden = not (item.foreground().color() == _COLOR_WORKING
+                              and ' · AV' in item.text())
             else:
-                item.setHidden(item.foreground().color() != target)
+                hidden = bool(target and item.foreground().color() != target)
+            item.setHidden(hidden)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                ip, port, _ = data
+                self._mosaic_grid.set_cell_visible(ip, port, not hidden)
         self._update_count()
 
     def _visible_items(self):
         """Returns list of (key, item) for currently visible stream items."""
         return [(k, v) for k, v in self._stream_items.items() if not v.isHidden()]
 
+    def _remove_stream(self, key, item):
+        """Remove a stream from list, mosaic and stream_items dict."""
+        self._audio_probes.pop(key, None)
+        self._streams_list.takeItem(self._streams_list.row(item))
+        del self._stream_items[key]
+        if key in self._mosaic_cells:
+            del self._mosaic_cells[key]
+            self._mosaic_grid.remove_cell(*key)
+
     def _clear_streams(self):
         for key, item in self._visible_items():
-            self._streams_list.takeItem(self._streams_list.row(item))
-            del self._stream_items[key]
+            self._remove_stream(key, item)
         self._update_count()
 
     def _clear_failed_streams(self):
         for key, item in list(self._stream_items.items()):
             if item.foreground().color() == _COLOR_FAILED:
-                self._streams_list.takeItem(self._streams_list.row(item))
-                del self._stream_items[key]
+                self._remove_stream(key, item)
         self._update_count()
 
     def _save_streams(self):
@@ -1280,8 +2078,19 @@ class VulnCamWindow(QMainWindow):
             return
         if not path.endswith('.json'):
             path += '.json'
-        data = [{'ip': ip, 'port': port, 'title': item.text()[2:]}
-                for (ip, port), item in self._visible_items()]
+        data = []
+        for (ip, port), item in self._visible_items():
+            entry = {'ip': ip, 'port': port, 'title': item.text()[2:]}
+            cell = self._mosaic_cells.get((ip, port))
+            if cell and cell.audio_type() is not None:
+                entry['audio'] = cell.audio_type()
+            else:
+                text = item.text()
+                for badge in (' · V', ' · AV'):
+                    if badge in text:
+                        entry['audio'] = badge.strip(' · ')
+                        break
+            data.append(entry)
         with open(path, 'w') as f:
             json.dump(data, f, indent=2)
 
@@ -1292,6 +2101,7 @@ class VulnCamWindow(QMainWindow):
             return
         added = skipped = 0
         errors = []
+        audio_map = {}   # key → audio type, for applying badges after sync
         for path in paths:
             try:
                 with open(path) as f:
@@ -1309,15 +2119,26 @@ class VulnCamWindow(QMainWindow):
                 if key in self._stream_items:
                     skipped += 1
                     continue
-                item = QListWidgetItem('⬤ ' + title)
-                item.setForeground(_COLOR_LAUNCHING)
+                audio = entry.get('audio')
+                display = '⬤ ' + title + (f' · {audio}' if audio else '')
+                item = QListWidgetItem(display)
+                item.setForeground(_COLOR_IDLE)
                 item.setData(Qt.ItemDataRole.UserRole, (ip, int(port), title))
                 self._stream_items[key] = item
                 self._streams_list.addItem(item)
+                if audio:
+                    audio_map[key] = audio
                 added += 1
         if errors:
             QMessageBox.warning(self, 'Error',
                                 self._t('dlg_load_err').format('\n'.join(errors)))
+        if self._mosaic_radio.isChecked():
+            self._sync_mosaic_cells()
+        for key, audio in audio_map.items():
+            cell = self._mosaic_cells.get(key)
+            if cell:
+                cell.set_audio_type(audio)
+        self._filter_combo.setCurrentIndex(0)  # reset to All so loaded streams are visible
         self._apply_filter()
         self._append_log(self._t('log_load_summary').format(added, skipped, len(paths)))
 
@@ -1347,9 +2168,11 @@ class VulnCamWindow(QMainWindow):
             max_processes = self.max_proc_spin.value(),
             max_windows   = 9999,
             stream_record = self.record_check.isChecked(),
-            check_only    = self._check_only_check.isChecked(),
+            check_only    = self._check_only_check.isChecked() and self._list_radio.isChecked(),
             probe_seconds = self._probe_spin.value(),
-            verbose       = False,
+            generate_mosaic  = False,
+            thumb_timeout    = self._thumb_timeout_spin.value(),
+            verbose          = False,
         )
         self._running_source = 'connect_all'
         self.log_view.clear()
@@ -1361,33 +2184,148 @@ class VulnCamWindow(QMainWindow):
         t = TRANSLATIONS[self._lang]
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running and self._running_source == 'shodan')
-        # connect_all button: toggles to Stop when it started the session
         if self._running_source == 'connect_all':
             self._connect_btn.setText(
                 t['btn_stop_connect'] if running else t['btn_connect_all'])
             self._connect_btn.setEnabled(True)
             self._connect_selected_btn.setEnabled(not running)
-        # connect_selected button: toggles to Stop when it started the session
+            self._scan_btn.setEnabled(not running)
+            self._scan_selected_btn.setEnabled(not running)
         elif self._running_source == 'connect_selected':
             self._connect_selected_btn.setText(
                 t['btn_stop_connect'] if running else t['btn_connect_selected'])
             self._connect_selected_btn.setEnabled(True)
             self._connect_btn.setEnabled(not running)
+            self._scan_btn.setEnabled(not running)
+            self._scan_selected_btn.setEnabled(not running)
+        elif self._running_source == 'scan_all':
+            self._scan_btn.setText(
+                t['btn_stop_connect'] if running else t['btn_scan'])
+            self._scan_btn.setEnabled(True)
+            self._connect_btn.setEnabled(not running)
+            self._connect_selected_btn.setEnabled(not running)
+            self._scan_selected_btn.setEnabled(not running)
+        elif self._running_source == 'scan_selected':
+            self._scan_selected_btn.setText(
+                t['btn_stop_connect'] if running else t['btn_scan_selected'])
+            self._scan_selected_btn.setEnabled(True)
+            self._connect_btn.setEnabled(not running)
+            self._connect_selected_btn.setEnabled(not running)
+            self._scan_btn.setEnabled(not running)
         else:
             self._connect_btn.setEnabled(not running)
             self._connect_selected_btn.setEnabled(not running)
+            self._scan_btn.setEnabled(not running)
+            self._scan_selected_btn.setEnabled(not running)
         self._clear_btn.setEnabled(not running)
         self._clear_failed_btn.setEnabled(not running)
         self._load_streams_btn.setEnabled(not running)
+        self._save_streams_btn.setEnabled(not running)
+        self._list_radio.setEnabled(not running)
+        self._mosaic_radio.setEnabled(not running)
+        self.record_check.setEnabled(not running)
+        self._check_only_check.setEnabled(not running and self._list_radio.isChecked())
 
     def eventFilter(self, obj, event):
-        if (obj is self._streams_list
-                and event.type() == QEvent.Type.KeyPress
-                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
-                and self._streams_list.selectedItems()):
-            self._on_connect_selected_clicked()
-            return True
+        if (event.type() == QEvent.Type.KeyPress
+                and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)):
+            # Never start a new worker while one is running
+            if self._running_source is not None:
+                return True
+            if obj is self._streams_list and self._streams_list.selectedItems():
+                self._on_connect_selected_clicked()
+                return True
+            if obj is self._mosaic_grid and self._mosaic_grid.selected_keys():
+                self._on_connect_selected_clicked()
+                return True
         return super().eventFilter(obj, event)
+
+    def _on_scan_btn_clicked(self):
+        if self._running_source == 'scan_all':
+            self._stop()
+        else:
+            self._scan_all()
+
+    def _on_scan_selected_btn_clicked(self):
+        if self._running_source == 'scan_selected':
+            self._stop()
+        else:
+            self._scan_selected()
+
+    def _scan_all(self):
+        """Generate thumbnails for all visible streams in mosaic mode."""
+        visible = self._visible_items()
+        if not visible:
+            return
+        if not self._ensure_mpv_path():
+            return
+        config = self._build_config()
+        if not check_config(config):
+            QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
+                                 self._t('dlg_cfg_err_msg'))
+            return
+        if sys.platform == 'linux' and not check_linux_software():
+            QMessageBox.critical(self, self._t('dlg_sw_err_title'),
+                                 self._t('dlg_sw_err_msg'))
+            return
+        for _, item in visible:
+            item.setForeground(_COLOR_LAUNCHING)
+        matches = [key for key, _ in visible]
+        args = Namespace(
+            random_pages  = False,
+            leave_windows = False,
+            max_processes = self.max_proc_spin.value(),
+            max_windows   = 9999,
+            stream_record = False,
+            check_only    = False,
+            probe_seconds = self._probe_spin.value(),
+            generate_mosaic = True,
+            thumb_timeout   = self._thumb_timeout_spin.value(),
+            verbose         = False,
+        )
+        self._running_source = 'scan_all'
+        self.log_view.clear()
+        self._start_worker(config, args, matches=matches)
+
+    def _scan_selected(self):
+        """Generate thumbnails for selected streams in mosaic mode."""
+        selected_keys = self._mosaic_grid.selected_keys()
+        if not selected_keys:
+            return
+        if not self._ensure_mpv_path():
+            return
+        config = self._build_config()
+        if not check_config(config):
+            QMessageBox.critical(self, self._t('dlg_cfg_err_title'),
+                                 self._t('dlg_cfg_err_msg'))
+            return
+        if sys.platform == 'linux' and not check_linux_software():
+            QMessageBox.critical(self, self._t('dlg_sw_err_title'),
+                                 self._t('dlg_sw_err_msg'))
+            return
+        matches = []
+        for ip, port in selected_keys:
+            item = self._stream_items.get((ip, port))
+            if item:
+                item.setForeground(_COLOR_LAUNCHING)
+                matches.append((ip, port))
+        if not matches:
+            return
+        args = Namespace(
+            random_pages  = False,
+            leave_windows = False,
+            max_processes = self.max_proc_spin.value(),
+            max_windows   = 9999,
+            stream_record = False,
+            check_only    = False,
+            probe_seconds = self._probe_spin.value(),
+            generate_mosaic = True,
+            thumb_timeout   = self._thumb_timeout_spin.value(),
+            verbose         = False,
+        )
+        self._running_source = 'scan_selected'
+        self.log_view.clear()
+        self._start_worker(config, args, matches=matches)
 
     def _on_connect_btn_clicked(self):
         if self._running_source == 'connect_all':
@@ -1402,8 +2340,21 @@ class VulnCamWindow(QMainWindow):
             self._connect_selected()
 
     def _connect_selected(self):
-        selected = self._streams_list.selectedItems()
-        if not selected:
+        # Get selection from the active view (list or mosaic)
+        if self._mosaic_radio.isChecked():
+            selected_keys = self._mosaic_grid.selected_keys()
+            if not selected_keys:
+                return
+        else:
+            selected_items = self._streams_list.selectedItems()
+            if not selected_items:
+                return
+            selected_keys = []
+            for item in selected_items:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if data:
+                    selected_keys.append((data[0], data[1]))
+        if not selected_keys:
             return
         if not self._ensure_mpv_path():
             return
@@ -1417,11 +2368,11 @@ class VulnCamWindow(QMainWindow):
                                  self._t('dlg_sw_err_msg'))
             return
         matches = []
-        for item in selected:
-            data = item.data(Qt.ItemDataRole.UserRole)
-            if data:
-                ip, port, _ = data
-                matches.append((ip, port))
+        for ip, port in selected_keys:
+            item = self._stream_items.get((ip, port))
+            if item:
+                ip_d, port_d, _ = item.data(Qt.ItemDataRole.UserRole)
+                matches.append((ip_d, port_d))
                 item.setForeground(_COLOR_LAUNCHING)
         if not matches:
             return
@@ -1432,9 +2383,11 @@ class VulnCamWindow(QMainWindow):
             max_processes = self.max_proc_spin.value(),
             max_windows   = 9999,
             stream_record = self.record_check.isChecked(),
-            check_only    = self._check_only_check.isChecked(),
+            check_only    = self._check_only_check.isChecked() and self._list_radio.isChecked(),
             probe_seconds = self._probe_spin.value(),
-            verbose       = False,
+            generate_mosaic  = False,
+            thumb_timeout    = self._thumb_timeout_spin.value(),
+            verbose          = False,
         )
         self._running_source = 'connect_selected'
         self.log_view.clear()
@@ -1445,30 +2398,156 @@ class VulnCamWindow(QMainWindow):
         self._refresh_stats_label()
 
     def _refresh_stats_label(self):
-        procs, wins = self._last_stats
+        procs, _ = self._last_stats
         procs += len(self._reconnect_pids)
+        wins = len(self._live_mpv_pids)
         t = TRANSLATIONS[self._lang]
         self._stats_label.setText(
             f'{t["lbl_stat_proc"]}: {procs} / {self.max_proc_spin.value()}   '
             f'{t["lbl_stat_win"]}: {wins}'
         )
 
+    # ── Mosaic helpers ────────────────────────────────────────────────────────
+
+    def _sync_mosaic_cells(self):
+        """Create mosaic cells for any stream_items not yet in the mosaic.
+        Cells start in 'waiting' state — no thumbnail generation until user acts."""
+        t = TRANSLATIONS[self._lang]
+        for (ip, port), item in self._stream_items.items():
+            if (ip, port) not in self._mosaic_cells:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                title = data[2] if data else f'{ip}:{port}'
+                self._mosaic_grid.add_cell(
+                    ip, port, title,
+                    t['mosaic_connecting'], t['mosaic_no_signal'],
+                    t['mosaic_waiting'], t['mosaic_working'])
+                cell = self._mosaic_grid.get_cell(ip, port)
+                cell.set_status('waiting')
+                self._mosaic_cells[(ip, port)] = cell
+                self._mosaic_grid.set_cell_visible(ip, port, not item.isHidden())
+
+    def _poll_live_mpv(self):
+        """Remove PIDs of closed MPV windows and refresh the counter."""
+        dead = set()
+        for pid in self._live_mpv_pids:
+            try:
+                p = psutil.Process(pid)
+                if p.status() == psutil.STATUS_ZOMBIE:
+                    dead.add(pid)
+            except psutil.NoSuchProcess:
+                dead.add(pid)
+        if dead:
+            self._live_mpv_pids -= dead
+            self._refresh_stats_label()
+        if not self._live_mpv_pids:
+            self._live_mpv_timer.stop()
+
+    def _add_live_mpv_pid(self, pid):
+        self._live_mpv_pids.add(pid)
+        self._live_mpv_timer.start()
+        self._refresh_stats_label()
+
+    @pyqtSlot(int)
+    def _on_worker_window_opened(self, pid):
+        self._add_live_mpv_pid(pid)
+
+    def _on_view_mode_changed(self, _btn, checked):
+        if not checked:
+            return
+        mosaic = self._mosaic_radio.isChecked()
+        self._streams_list.setVisible(not mosaic)
+        self._mosaic_grid.setVisible(mosaic)
+        self._scan_btn.setVisible(mosaic)
+        self._scan_selected_btn.setVisible(mosaic)
+        self._thumb_size_combo.setVisible(mosaic)
+        # Check Only is incompatible with mosaic (thumbnail capture acts as the check)
+        self._check_only_check.setEnabled(not mosaic)
+        self._probe_spin.setEnabled(not mosaic and self._check_only_check.isChecked())
+        self._label_probe.setEnabled(not mosaic and self._check_only_check.isChecked())
+        if mosaic:
+            self._sync_mosaic_cells()
+
+    def _on_thumb_size_changed(self, _index):
+        w, h = self._thumb_size_combo.currentData()
+        self._mosaic_grid.set_thumb_size(w, h)
+
+    def _retry_or_fail_thumbnail(self, ip, port, cell):
+        """Re-queue thumbnail generation or mark as failed if retries exhausted."""
+        if cell.has_thumbnail():
+            return   # already have one, nothing to do
+        mpv = self.mpv_path.text().strip()
+        if mpv and cell._thumb_retries < MAX_THUMB_RETRIES:
+            cell._thumb_retries += 1
+            cell.set_status('launching')   # back to orange while retrying
+            self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+        else:
+            cell.set_status('failed')
+
+    def _on_thumbnail_ready(self, ip, port, pixmap):
+        try:
+            cell = self._mosaic_cells.get((ip, port))
+            if cell:
+                if pixmap and not pixmap.isNull():
+                    cell.set_thumbnail(pixmap)
+                    cell.set_status('working')
+                elif not cell.has_thumbnail():
+                    self._retry_or_fail_thumbnail(ip, port, cell)
+        except Exception as e:
+            print(f'_on_thumbnail_ready error ({ip}:{port}): {e}', file=sys.stderr)
+        finally:
+            thumb_dir = os.path.join(self._temp_dir, f'{ip}_{port}')
+            shutil.rmtree(thumb_dir, ignore_errors=True)
+
+    def _on_mosaic_cell_double_clicked(self, ip, port, title):
+        # Reuse double-click logic: find the list item and delegate
+        item = self._stream_items.get((ip, port))
+        if item:
+            self._on_stream_double_clicked(item)
+
+    def _on_worker_thumbnail_generated(self, ip, port, file_path):
+        """Load QPixmap in main thread (thread-safe) then update mosaic cell."""
+        px = QPixmap(file_path) if file_path else None
+        if px and px.isNull():
+            px = None
+        self._on_thumbnail_ready(ip, port, px)
+
     def _start_worker(self, config, args, matches=None, skip_fn=None):
+        # Defensive: should never happen, but guard against double-start
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait(3000)
+
         max_procs_ref = [args.max_processes]
         self._proc_conn = self.max_proc_spin.valueChanged.connect(
             lambda v: max_procs_ref.__setitem__(0, v))
-        self.worker = VulnCamWorker(config, args, matches=matches, skip_fn=skip_fn,
-                                    max_procs_ref=max_procs_ref)
-        self.worker.log_message.connect(self._append_log)
-        self.worker.error.connect(lambda e: self._append_log(f'Error: {e}'))
-        self.worker.stream_added.connect(self._on_stream_added)
-        self.worker.stream_status.connect(self._on_stream_status)
-        self.worker.stream_skipped.connect(
+        thumb_dir = self._temp_dir if getattr(args, 'generate_mosaic', False) else None
+        w = VulnCamWorker(config, args, matches=matches, skip_fn=skip_fn,
+                          max_procs_ref=max_procs_ref, thumb_base_dir=thumb_dir)
+        self.worker = w
+        self._worker_refs.append(w)   # keep Python reference alive until finished
+
+        def _worker_cleanup():
+            try:
+                self._worker_refs.remove(w)
+            except ValueError:
+                pass
+            if self.worker is w:
+                self.worker = None
+            w.deleteLater()
+
+        w.log_message.connect(self._append_log)
+        w.error.connect(lambda e: self._append_log(f'Error: {e}'))
+        w.stream_added.connect(self._on_stream_added)
+        w.stream_status.connect(self._on_stream_status)
+        w.stream_skipped.connect(
             lambda label: self._append_log(self._t('log_duplicate').format(label)))
-        self.worker.stats_update.connect(self._on_stats_update)
-        self.worker.finished.connect(self._on_finished)
+        w.stats_update.connect(self._on_stats_update)
+        w.window_opened.connect(self._on_worker_window_opened)
+        w.thumbnail_generated.connect(self._on_worker_thumbnail_generated)
+        w.finished.connect(self._on_finished)
+        w.finished.connect(_worker_cleanup)   # always runs after _on_finished
         self._search_start_time = time.time()
-        self.worker.start()
+        w.start()
         self._set_running(True)
 
     def _start(self):
@@ -1493,9 +2572,11 @@ class VulnCamWindow(QMainWindow):
             stream_record = self.record_check.isChecked(),
             leave_windows = self.leave_check.isChecked(),
             total_results = self.allres_check.isChecked(),
-            check_only    = self._check_only_check.isChecked(),
-            probe_seconds = self._probe_spin.value(),
-            verbose       = False,
+            check_only       = self._check_only_check.isChecked() and self._list_radio.isChecked(),
+            probe_seconds    = self._probe_spin.value(),
+            generate_mosaic  = self._mosaic_radio.isChecked(),
+            thumb_timeout    = self._thumb_timeout_spin.value(),
+            verbose          = False,
         )
         dedup = self._dedup_check.isChecked()
         items_ref = self._stream_items
@@ -1512,10 +2593,17 @@ class VulnCamWindow(QMainWindow):
     def _on_finished(self):
         self._set_running(False)
         self._running_source = None
-        # Disconnect dynamic spinbox connections
         if hasattr(self, '_proc_conn'):
             self.max_proc_spin.valueChanged.disconnect(self._proc_conn)
-        self._on_stats_update(0, 0)   # resets _last_stats and refreshes label
+        self._on_stats_update(0, 0)
+        # Any stream still orange (launched but never resolved) → mark as failed
+        for key, item in self._stream_items.items():
+            if item.foreground().color() == _COLOR_LAUNCHING:
+                item.setForeground(_COLOR_FAILED)
+                cell = self._mosaic_cells.get(key)
+                if cell and cell.status() == 'launching':
+                    cell.set_status('failed')
+        self._apply_filter()
         elapsed = int(time.time() - self._search_start_time)
         h, remainder = divmod(elapsed, 3600)
         m, s = divmod(remainder, 60)
@@ -1526,8 +2614,31 @@ class VulnCamWindow(QMainWindow):
         self.log_view.moveCursor(QTextCursor.MoveOperation.End)
 
 
+def _qt_message_handler(mode, context, message):
+    """Forward Qt warnings/errors to stderr so they appear in the terminal."""
+    import traceback
+    levels = {0: 'Qt[Debug]', 1: 'Qt[Warning]', 2: 'Qt[Critical]',
+              3: 'Qt[Fatal]', 4: 'Qt[Info]'}
+    print(f'{levels.get(mode, "Qt[?]")}: {message}', file=sys.stderr)
+
+
 def main():
     import base64
+    from PyQt6.QtCore import qInstallMessageHandler
+    import traceback
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        print(msg, file=sys.stderr)
+        try:
+            with open('/tmp/vulncam_crash.log', 'a') as f:
+                f.write(msg + '\n')
+        except Exception:
+            pass
+
+    sys.excepthook = _excepthook
+    qInstallMessageHandler(_qt_message_handler)
+
     app = QApplication(sys.argv)
     app.setApplicationName('VulnCam')
     app.setDesktopFileName('vulncam')
