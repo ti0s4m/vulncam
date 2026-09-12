@@ -20,8 +20,8 @@ from PyQt6.QtWidgets import (
     QSplitter, QListWidget, QListWidgetItem,
     QRadioButton, QButtonGroup, QFrame, QMenu,
 )
-from PyQt6.QtCore import (QThreadPool, Qt, QTimer, QEvent, pyqtSlot)
-from PyQt6.QtGui import QFont, QTextCursor, QPixmap
+from PyQt6.QtCore import (QThreadPool, Qt, QTimer, QEvent, QUrl, pyqtSlot)
+from PyQt6.QtGui import QFont, QTextCursor, QPixmap, QDesktopServices
 
 from vulncam import (
     check_config, check_linux_software, list_window_titles,
@@ -989,12 +989,30 @@ class VulnCamWindow(QMainWindow):
         act_stop_record.setEnabled(bool(recording))
         menu.addSeparator()
         act_copy = menu.addAction(self._t('ctx_copy_rtsp'))
+
+        # Recordings submenu: about the single stream that was right-clicked, not
+        # the whole multi-selection — opening/browsing recordings isn't a bulk action.
+        recording_actions = {}
+        act_open_folder = None
+        recordings = self._recordings_for(key)
+        if recordings:
+            menu.addSeparator()
+            rec_menu = menu.addMenu(self._t('ctx_recordings_menu'))
+            for path in recordings:
+                recording_actions[rec_menu.addAction(os.path.basename(path))] = path
+            rec_menu.addSeparator()
+            act_open_folder = rec_menu.addAction(self._t('ctx_open_recordings_folder'))
+
         menu.addSeparator()
         act_delete = menu.addAction(self._t('ctx_delete'))
         act_delete.setEnabled(self._running_source is None)
 
         chosen = menu.exec(global_pos)
-        if chosen is act_connect:
+        if chosen in recording_actions:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(recording_actions[chosen]))
+        elif act_open_folder is not None and chosen is act_open_folder:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._recording_folder(key)))
+        elif chosen is act_connect:
             self._connect_targets(connectable)
         elif chosen is act_record:
             self._connect_targets(connectable, force_record=True)
