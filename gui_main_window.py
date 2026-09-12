@@ -117,6 +117,16 @@ class VulnCamWindow(QMainWindow):
                 w.stop()
                 w.wait(3000)
         self._worker_refs.clear()
+        # Headless recordings have no window, so leaving them running would orphan
+        # them invisibly; a live-window session is left alone, same as any other
+        # mpv window the user opened by double-click.
+        for key, session in list(self._stream_sessions.items()):
+            if session['headless']:
+                try:
+                    psutil.Process(session['pid']).kill()
+                except Exception:
+                    pass
+                self._stream_sessions.pop(key, None)
         self._live_mpv_timer.stop()
         self._live_mpv_pids.clear()
         self._thumb_manager.stop()
@@ -962,6 +972,8 @@ class VulnCamWindow(QMainWindow):
         connectable = [k for k in targets if self._can_connect(k)]
         playing = [k for k in targets
                   if k in self._stream_sessions and not self._stream_sessions[k]['headless']]
+        recording = [k for k in targets
+                    if k in self._stream_sessions and self._stream_sessions[k]['headless']]
 
         menu = QMenu(self)
         act_connect = menu.addAction(self._t('ctx_connect'))
@@ -970,6 +982,11 @@ class VulnCamWindow(QMainWindow):
         act_record.setEnabled(bool(connectable))
         act_stop_playback = menu.addAction(self._t('ctx_stop_playback'))
         act_stop_playback.setEnabled(bool(playing))
+        menu.addSeparator()
+        act_start_headless = menu.addAction(self._t('ctx_start_headless_record'))
+        act_start_headless.setEnabled(bool(connectable))
+        act_stop_record = menu.addAction(self._t('ctx_stop_record'))
+        act_stop_record.setEnabled(bool(recording))
         menu.addSeparator()
         act_copy = menu.addAction(self._t('ctx_copy_rtsp'))
         menu.addSeparator()
@@ -983,6 +1000,10 @@ class VulnCamWindow(QMainWindow):
             self._connect_targets(connectable, force_record=True)
         elif chosen is act_stop_playback:
             self._stop_targets(playing)
+        elif chosen is act_start_headless:
+            self._start_headless_targets(connectable)
+        elif chosen is act_stop_record:
+            self._stop_targets(recording)
         elif chosen is act_copy:
             self._copy_rtsp_links(targets)
         elif chosen is act_delete:
@@ -996,6 +1017,37 @@ class VulnCamWindow(QMainWindow):
     def _connect_targets(self, keys, force_record=None):
         for key in keys:
             self._connect_stream(key, self._target_title(key), force_record=force_record)
+
+    def _start_headless_targets(self, keys):
+        for key in keys:
+            self._start_headless_recording(key, self._target_title(key))
+
+    def _start_headless_recording(self, key, title):
+        """Record a stream to disk without opening any window (mpv --vo=null
+        --force-window=no) — a separate mpv process from live playback, so it can
+        be stopped independently without affecting a viewer watching the stream."""
+        if key in self._stream_sessions:
+            self._append_log(self._t('log_already_playing').format(title))
+            return
+        ip, port = key
+        mpv_path = self.mpv_path.text().strip()
+        if not mpv_path:
+            QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
+                                self._t('dlg_mpv_no_path'))
+            return
+        record_path = self._new_recording_path(key)
+        cmd = [mpv_path, '--vo=null', '--force-window=no',
+               '--really-quiet', '--no-terminal',
+               f'--stream-record={record_path}', f'rtsp://{ip}:{port}']
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.STDOUT)
+        except Exception as e:
+            QMessageBox.critical(self, self._t('dlg_mpv_err_title'),
+                                 self._t('dlg_mpv_err_msg').format(e))
+            return
+        self._mark_session(key, proc.pid, headless=True, record_path=record_path)
+        self._append_log(self._t('log_recording_started').format(title))
 
     def _stop_targets(self, keys):
         for key in keys:
