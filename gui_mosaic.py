@@ -53,6 +53,15 @@ class MosaicCell(QFrame):
         self._audio_badge.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._audio_badge.setVisible(False)
+        self._session_badge = QLabel(self._img_lbl)
+        self._session_badge.setStyleSheet(
+            'background: rgba(0,0,0,170); color: #ffcc00;'
+            ' padding: 1px 4px; border-radius: 3px;'
+            ' font-size: 9px; font-weight: bold;')
+        self._session_badge.setAttribute(
+            Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._session_badge.setVisible(False)
+        self._session_badge.move(4, 4)   # top-left; audio badge owns bottom-right
         self._title_lbl = QLabel()
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title_lbl.setWordWrap(True)
@@ -170,6 +179,17 @@ class MosaicCell(QFrame):
         b.move(self._thumb_w - b.width() - 4,
                self._thumb_h - b.height() - 4)
 
+    def set_session_badge(self, text):
+        """Show a short play/record-state tag (e.g. 'PLAY', 'REC', 'SAVED') top-left,
+        or hide it when text is None."""
+        if not text:
+            self._session_badge.setVisible(False)
+            return
+        self._session_badge.setText(text)
+        self._session_badge.adjustSize()
+        self._session_badge.setVisible(True)
+        self._session_badge.raise_()
+
     def resize_thumb(self, w, h):
         self._placeholder_cache.clear()   # cached placeholders are size-specific
         self._thumb_w = w
@@ -202,6 +222,7 @@ class MosaicCell(QFrame):
         self._thumb_retries = 0
         self._status = 'launching'
         self._audio_badge.setVisible(False)
+        self._session_badge.setVisible(False)
         self._refresh()
 
     def audio_type(self):

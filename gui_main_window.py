@@ -822,6 +822,8 @@ class VulnCamWindow(QMainWindow):
                 cell.reset_retries()
                 cell.set_audio_type(None)
 
+        if key:
+            self._refresh_stream_badge(key)
         self._apply_filter()
         if not item.isHidden():
             self._streams_list.scrollToItem(item)
@@ -871,16 +873,12 @@ class VulnCamWindow(QMainWindow):
     def _on_audio_probe_done(self, ip, port, result):
         key = (ip, port)
         self._audio_probes.pop(key, None)
-        item = self._stream_items.get(key)
-        if item:
-            text = item.text()
-            for badge in (' · V', ' · AV'):
-                text = text.replace(badge, '')
-            item.setText(text + f' · {result}')
-            self._apply_filter()
         cell = self._mosaic_cells.get(key)
         if cell:
             cell.set_audio_type(result)
+        self._refresh_stream_badge(key)
+        if key in self._stream_items:
+            self._apply_filter()
 
     def _on_stream_double_clicked(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)
@@ -1116,7 +1114,12 @@ class VulnCamWindow(QMainWindow):
             path += '.json'
         data = []
         for (ip, port), item in self._visible_items():
-            entry = {'ip': ip, 'port': port, 'title': item.text()[2:]}
+            # Use the canonical title (UserRole), not the display text — the latter
+            # may carry appended badges (audio, play/record state) that must never
+            # leak into the saved title (they'd get duplicated on reload).
+            role_data = item.data(Qt.ItemDataRole.UserRole)
+            title = role_data[2] if role_data else item.text()[2:]
+            entry = {'ip': ip, 'port': port, 'title': title}
             cell = self._mosaic_cells.get((ip, port))
             if cell and cell.audio_type() is not None:
                 entry['audio'] = cell.audio_type()
@@ -1137,7 +1140,8 @@ class VulnCamWindow(QMainWindow):
             return
         added = skipped = 0
         errors = []
-        audio_map = {}   # key → audio type, for applying badges after sync
+        audio_map = {}     # key → audio type, for applying badges after sync
+        loaded_keys = []
         for path in paths:
             try:
                 with open(path) as f:
@@ -1156,14 +1160,14 @@ class VulnCamWindow(QMainWindow):
                     skipped += 1
                     continue
                 audio = entry.get('audio')
-                display = '⬤ ' + title + (f' · {audio}' if audio else '')
-                item = QListWidgetItem(display)
+                item = QListWidgetItem('⬤ ' + title)
                 item.setForeground(COLOR_IDLE)
                 item.setData(Qt.ItemDataRole.UserRole, (ip, int(port), title))
                 self._stream_items[key] = item
                 self._streams_list.addItem(item)
                 if audio:
                     audio_map[key] = audio
+                loaded_keys.append(key)
                 added += 1
         if errors:
             QMessageBox.warning(self, self._t('dlg_load_err_title'),
@@ -1173,6 +1177,8 @@ class VulnCamWindow(QMainWindow):
             cell = self._mosaic_cells.get(key)
             if cell:
                 cell.set_audio_type(audio)
+        for key in loaded_keys:
+            self._refresh_stream_badge(key)   # picks up audio + any SAVED recordings
         self._filter_combo.setCurrentIndex(0)  # reset to All so loaded streams are visible
         self._apply_filter()
         self._append_log(self._t('log_load_summary').format(added, skipped, len(paths)))
@@ -1263,10 +1269,42 @@ class VulnCamWindow(QMainWindow):
         }
         self._live_mpv_timer.start()
         self._refresh_connect_buttons()
+        self._refresh_stream_badge(key)
 
     def _end_session(self, key):
         self._stream_sessions.pop(key, None)
         self._refresh_connect_buttons()
+        self._refresh_stream_badge(key)
+
+    def _session_badge_text(self, key):
+        """Short tag summarizing this stream's play/record state, or None for
+        nothing to show — same order of precedence in both list and mosaic."""
+        session = self._stream_sessions.get(key)
+        if session:
+            if session['headless']:
+                return 'REC'
+            return 'PLAY·REC' if session['record_path'] else 'PLAY'
+        if self._recordings_for(key):
+            return 'SAVED'
+        return None
+
+    def _refresh_stream_badge(self, key):
+        """Recompute and apply the play/record badge for one stream, in both views."""
+        badge = self._session_badge_text(key)
+        cell = self._mosaic_cells.get(key)
+        if cell:
+            cell.set_session_badge(badge)
+        item = self._stream_items.get(key)
+        if item:
+            data = item.data(Qt.ItemDataRole.UserRole)
+            title = data[2] if data else f'{key[0]}:{key[1]}'
+            parts = ['⬤ ' + title]
+            audio = cell.audio_type() if cell else None
+            if audio:
+                parts.append(audio)
+            if badge:
+                parts.append(badge)
+            item.setText(' · '.join(parts))
 
     def _stop_session(self, key, title):
         session = self._stream_sessions.get(key)
