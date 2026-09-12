@@ -34,218 +34,17 @@ from vulncam import (
     DEFAULT_CONFIG_FILE, DEFAULT_QUERY, DEFAULT_MAX_PROCS, DEFAULT_PAGES,
     DEFAULT_TIMEOUT, RESULTS_PER_PAGE, MAX_PAGES,
 )
+from gui_resources import APP_ICON_B64
+from gui_i18n import TRANSLATIONS
+from gui_constants import (
+    COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED,
+    THUMB_SIZES, THUMB_W, THUMB_H, MAX_THUMB_RETRIES,
+)
 
-
-_APP_ICON_B64 = "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"
 _vulncam_logger = logging.getLogger('vulncam')
-
-TRANSLATIONS = {
-    'en': {
-        'window_title':       'VulnCam',
-        'label_language':     'Language:',
-        'group_config':       'Configuration',
-        'label_config_file':  'Config file:',
-        'btn_browse':         'Browse...',
-        'btn_save_cfg':       'Save',
-        'label_shodan_key':   'Shodan API Key:',
-        'label_mpv_path':     'MPV Path:',
-        'label_ipgeo_key':    'IPGeo API Key (optional):',
-        'group_playback':     'Playback',
-        'label_max_proc':     'Max processes:',
-        'btn_view_list':      'List',
-        'btn_view_mosaic':    'Mosaic',
-        'thumb_small':        'Small',
-        'thumb_medium':       'Medium',
-        'thumb_large':        'Large',
-        'mosaic_connecting':  'Connecting...',
-        'mosaic_working':     'Working',
-        'mosaic_no_signal':   'No Signal',
-        'mosaic_waiting':     'Idle',
-        'check_record':       'Record streams',
-        'check_leave':        'Leave windows on finish',
-        'check_only':         'Check only',
-        'label_probe':        'Probe (s):',
-        'lbl_stat_proc':      'Proc',
-        'lbl_stat_win':       'Win',
-        'check_dedup':        'Skip duplicates',
-        'group_search':         'Shodan search',
-        'label_query':          'Query:',
-        'lbl_presets':          'Presets…',
-        'btn_adv_filters':      'Location',
-        'label_country':        'Country:',
-        'label_city':           'City:',
-        'btn_clear_filters':    'Clear',
-        'label_extend':         'Extend:',
-        'label_pages':          'Pages:',
-        'check_random':         'Random pages',
-        'check_allres':         'All results',
-        'btn_credits':          'Credits',
-        'dlg_credits_title':    'Shodan credits',
-        'dlg_credits_msg':      'Query credits: {}\nScan credits: {}',
-        'dlg_credits_err':      'Could not retrieve credits. Check your API key.',
-        'btn_shodan_info':      'Info',
-        'log_shodan_info_err':  'Shodan info error: {}',
-        'log_shodan_info_hdr':  '── Shodan account info ──',
-        'log_worker_error':     'Error: {}',
-        'dlg_load_err_title':   'Error',
-        'log_dev_plan_limit':   'Dev plan: random pages limited to 1. Fetching 1 random page.',
-        'log_duplicate':        'Already listed, skipping: {}',
-        'btn_restore':        'Restore defaults',
-        'btn_start':          'START',
-        'btn_stop':           'STOP',
-        'dlg_select_config':  'Select config file',
-        'dlg_select_mpv':     'Select MPV',
-        'ini_filter':         'INI files (*.ini)',
-        'btn_detect_mpv':     'Detect',
-        'log_mpv_detected':   'MPV auto-detected: {}',
-        'log_mpv_not_found':  'MPV not found automatically. Please set the path manually.',
-        'dlg_mpv_missing':    'MPV path is empty and could not be detected automatically.\nPlease install MPV or set its path manually.',
-        'dlg_cfg_err_title':  'Configuration error',
-        'dlg_cfg_err_msg':    'Required parameters missing (Shodan API Key and MPV Path).',
-        'dlg_sw_err_title':   'Missing software',
-        'dlg_sw_err_msg':     'mpv or wmctrl are not installed.',
-        'log_stopping':       'Stopping...',
-        'log_finished':       '── Finished ({}) ──',
-        'group_streams':      'Streams',
-        'label_filter':       'Filter:',
-        'filter_all':         'All',
-        'filter_working':     'Working',
-        'filter_working_av':  'Working (AV)',
-        'filter_failed':      'Failed',
-        'filter_launching':   'Launching',
-        'label_thumb_timeout': 'Thumb (s):',
-        'check_discard':      'Discard not working',
-        'btn_clear_streams':  'Clear',
-        'btn_clear_failed':   'Clear failed',
-        'btn_save_streams':   'Save',
-        'btn_load_streams':   'Load',
-        'btn_connect_all':      'Connect all',
-        'btn_connect_selected': 'Connect selected',
-        'btn_scan':             'Scan',
-        'btn_scan_selected':    'Scan selected',
-        'btn_stop_connect':     'Stop',
-        'log_reconnect':      'Reconnecting: {}',
-        'dlg_save_streams':   'Save stream list',
-        'dlg_load_streams':   'Load stream list(s)',
-        'json_filter':        'JSON files (*.json)',
-        'log_load_summary':   'Loaded {0} streams, {1} duplicates skipped ({2} file(s))',
-        'dlg_load_err':       'Could not read the following file(s):\n{}',
-        'streams_count':      '{} / {} streams',
-        'dlg_mpv_err_title':  'MPV launch error',
-        'dlg_mpv_err_msg':    'Could not start MPV. Check the MPV path in the configuration.\n\n{}',
-        'dlg_mpv_no_path':    'MPV path is not set. Please fill in the MPV Path field in the configuration.',
-    },
-    'es': {
-        'window_title':       'VulnCam',
-        'label_language':     'Idioma:',
-        'group_config':       'Configuración',
-        'label_config_file':  'Archivo config:',
-        'btn_browse':         'Buscar...',
-        'btn_save_cfg':       'Guardar',
-        'label_shodan_key':   'Shodan API Key:',
-        'label_mpv_path':     'MPV Path:',
-        'label_ipgeo_key':    'IPGeo API Key (opcional):',
-        'group_playback':     'Reproducción',
-        'label_max_proc':     'Máx procesos:',
-        'btn_view_list':      'Listado',
-        'btn_view_mosaic':    'Mosaico',
-        'thumb_small':        'Pequeño',
-        'thumb_medium':       'Mediano',
-        'thumb_large':        'Grande',
-        'mosaic_connecting':  'Conectando...',
-        'mosaic_working':     'Activo',
-        'mosaic_no_signal':   'Sin señal',
-        'mosaic_waiting':     'Idle',
-        'check_record':       'Grabar streams',
-        'check_leave':        'Dejar ventanas al terminar',
-        'check_only':         'Solo verificar',
-        'label_probe':        'Sonda (s):',
-        'lbl_stat_proc':      'Proc',
-        'lbl_stat_win':       'Vent',
-        'check_dedup':        'Omitir duplicados',
-        'group_search':         'Búsqueda Shodan',
-        'label_query':          'Query:',
-        'lbl_presets':          'Presets…',
-        'btn_adv_filters':      'Localización',
-        'label_country':        'País:',
-        'label_city':           'Ciudad:',
-        'btn_clear_filters':    'Limpiar',
-        'label_extend':         'Extender:',
-        'label_pages':          'Páginas:',
-        'check_random':         'Páginas aleatorias',
-        'check_allres':         'Todos los resultados',
-        'btn_credits':          'Créditos',
-        'dlg_credits_title':    'Créditos Shodan',
-        'dlg_credits_msg':      'Créditos de consulta: {}\nCréditos de escaneo: {}',
-        'dlg_credits_err':      'No se pudieron obtener los créditos. Comprueba tu API key.',
-        'btn_shodan_info':      'Info',
-        'log_shodan_info_err':  'Error info Shodan: {}',
-        'log_shodan_info_hdr':  '── Información cuenta Shodan ──',
-        'log_worker_error':     'Error: {}',
-        'dlg_load_err_title':   'Error',
-        'log_dev_plan_limit':   'Plan Dev: páginas aleatorias limitadas a 1. Se obtendrá 1 página aleatoria.',
-        'log_duplicate':        'Ya en el listado, omitiendo: {}',
-        'btn_restore':        'Restaurar valores por defecto',
-        'btn_start':          'START',
-        'btn_stop':           'STOP',
-        'dlg_select_config':  'Seleccionar config',
-        'dlg_select_mpv':     'Seleccionar MPV',
-        'ini_filter':         'INI files (*.ini)',
-        'btn_detect_mpv':     'Detectar',
-        'log_mpv_detected':   'MPV detectado automáticamente: {}',
-        'log_mpv_not_found':  'MPV no encontrado automáticamente. Por favor establece la ruta manualmente.',
-        'dlg_mpv_missing':    'El campo MPV Path está vacío y no se ha podido detectar automáticamente.\nInstala MPV o establece su ruta manualmente.',
-        'dlg_cfg_err_title':  'Error de configuración',
-        'dlg_cfg_err_msg':    'Faltan parámetros requeridos (Shodan API Key y MPV Path).',
-        'dlg_sw_err_title':   'Software no encontrado',
-        'dlg_sw_err_msg':     'mpv o wmctrl no están instalados.',
-        'log_stopping':       'Deteniendo...',
-        'log_finished':       '── Finalizado ({}) ──',
-        'group_streams':      'Streams',
-        'label_filter':       'Filtrar:',
-        'filter_all':         'Todas',
-        'filter_working':     'Activas',
-        'filter_working_av':  'Activas (AV)',
-        'filter_failed':      'Fallidas',
-        'filter_launching':   'Lanzando',
-        'label_thumb_timeout': 'Thumb (s):',
-        'check_discard':      'Descartar fallidos',
-        'btn_clear_streams':  'Limpiar',
-        'btn_clear_failed':   'Eliminar fallidos',
-        'btn_save_streams':   'Guardar',
-        'btn_load_streams':   'Cargar',
-        'btn_connect_all':      'Conectar todas',
-        'btn_connect_selected': 'Conectar seleccionadas',
-        'btn_scan':             'Escanear',
-        'btn_scan_selected':    'Escanear seleccionadas',
-        'btn_stop_connect':     'Detener',
-        'log_reconnect':      'Reconectando: {}',
-        'dlg_save_streams':   'Guardar lista de streams',
-        'dlg_load_streams':   'Cargar lista(s) de streams',
-        'json_filter':        'JSON files (*.json)',
-        'log_load_summary':   'Cargados {0} streams, {1} duplicados omitidos ({2} fichero(s))',
-        'dlg_load_err':       'No se pudieron leer los siguientes ficheros:\n{}',
-        'streams_count':      '{} / {} streams',
-        'dlg_mpv_err_title':  'Error al lanzar MPV',
-        'dlg_mpv_err_msg':    'No se pudo iniciar MPV. Comprueba la ruta del MPV en la configuración.\n\n{}',
-        'dlg_mpv_no_path':    'La ruta de MPV no está configurada. Por favor rellena el campo MPV Path en la configuración.',
-    },
-}
-
-_COLOR_IDLE      = QColor('#707070')
-_COLOR_LAUNCHING = QColor('#E8A020')
-_COLOR_WORKING   = QColor('#20A050')
-_COLOR_FAILED    = QColor('#C03030')
 
 PROBE_DEFAULT = 10
 
-THUMB_SIZES = [
-    ('small',  160,  90),
-    ('medium', 240, 135),
-    ('large',  320, 180),
-]
-THUMB_W, THUMB_H = THUMB_SIZES[1][1:]   # 16:9 medium (default)
-MAX_THUMB_RETRIES = 2
 
 QUERY_PRESETS = [
     ('RTSP + screenshot',  'RTSP has_screenshot:yes'),
@@ -364,16 +163,16 @@ class MosaicCell(QFrame):
                     self._make_placeholder(self._waiting_text, QColor('#606060')))
             elif self._status == 'launching':
                 self._img_lbl.setPixmap(
-                    self._make_placeholder(self._connect_text, _COLOR_LAUNCHING))
+                    self._make_placeholder(self._connect_text, COLOR_LAUNCHING))
             elif self._status == 'working':
                 self._img_lbl.setPixmap(
-                    self._make_placeholder(self._working_text, _COLOR_WORKING))
+                    self._make_placeholder(self._working_text, COLOR_WORKING))
             else:
                 self._img_lbl.setPixmap(
-                    self._make_placeholder(self._no_signal_text, _COLOR_FAILED))
-        c = {'waiting': '#404040', 'launching': _COLOR_LAUNCHING.name(),
-             'working': _COLOR_WORKING.name(), 'failed': _COLOR_FAILED.name()}
-        col = c.get(self._status, _COLOR_LAUNCHING.name())
+                    self._make_placeholder(self._no_signal_text, COLOR_FAILED))
+        c = {'waiting': '#404040', 'launching': COLOR_LAUNCHING.name(),
+             'working': COLOR_WORKING.name(), 'failed': COLOR_FAILED.name()}
+        col = c.get(self._status, COLOR_LAUNCHING.name())
         bg = '#1e2a38' if self._selected else '#0d0d0d'
         border = '3px solid #ffffff' if self._selected else f'2px solid {col}'
         self.setStyleSheet(
@@ -1869,12 +1668,12 @@ class VulnCamWindow(QMainWindow):
         if key and key in self._stream_items:
             item = self._stream_items[key]
             item.setText('⬤ ' + title)
-            item.setForeground(_COLOR_LAUNCHING)
+            item.setForeground(COLOR_LAUNCHING)
             item.setData(Qt.ItemDataRole.UserRole, (ip, port, title))
             item.setHidden(False)
         else:
             item = QListWidgetItem('⬤ ' + title)
-            item.setForeground(_COLOR_LAUNCHING)
+            item.setForeground(COLOR_LAUNCHING)
             if key:
                 item.setData(Qt.ItemDataRole.UserRole, (ip, port, title))
                 self._stream_items[key] = item
@@ -1916,7 +1715,7 @@ class VulnCamWindow(QMainWindow):
                 self._remove_stream(key, item)
                 self._update_count()
                 return
-            item.setForeground(_COLOR_WORKING if status == 'working' else _COLOR_FAILED)
+            item.setForeground(COLOR_WORKING if status == 'working' else COLOR_FAILED)
             self._apply_filter()
         cell = self._mosaic_cells.get((ip, port))
         if cell and not cell.has_thumbnail():
@@ -1986,7 +1785,7 @@ class VulnCamWindow(QMainWindow):
                                  self._t('dlg_mpv_err_msg').format(e))
             return
         # Only set orange (and log) once we know the process started
-        item.setForeground(_COLOR_LAUNCHING)
+        item.setForeground(COLOR_LAUNCHING)
         self._append_log(self._t('log_reconnect').format(title))
         self._reconnect_pids.add(proc.pid)
         self._refresh_stats_label()
@@ -2033,10 +1832,10 @@ class VulnCamWindow(QMainWindow):
     def _apply_filter(self, _index=None):
         fval = self._filter_combo.currentData()
         color_map = {
-            'working':    _COLOR_WORKING,
-            'working_av': _COLOR_WORKING,
-            'failed':     _COLOR_FAILED,
-            'launching':  _COLOR_LAUNCHING,
+            'working':    COLOR_WORKING,
+            'working_av': COLOR_WORKING,
+            'failed':     COLOR_FAILED,
+            'launching':  COLOR_LAUNCHING,
         }
         target = color_map.get(fval)
         for i in range(self._streams_list.count()):
@@ -2044,7 +1843,7 @@ class VulnCamWindow(QMainWindow):
             if fval == 'all':
                 hidden = False
             elif fval == 'working_av':
-                hidden = not (item.foreground().color() == _COLOR_WORKING
+                hidden = not (item.foreground().color() == COLOR_WORKING
                               and ' · AV' in item.text())
             else:
                 hidden = bool(target and item.foreground().color() != target)
@@ -2075,7 +1874,7 @@ class VulnCamWindow(QMainWindow):
 
     def _clear_failed_streams(self):
         for key, item in list(self._stream_items.items()):
-            if item.foreground().color() == _COLOR_FAILED:
+            if item.foreground().color() == COLOR_FAILED:
                 self._remove_stream(key, item)
         self._update_count()
 
@@ -2130,7 +1929,7 @@ class VulnCamWindow(QMainWindow):
                 audio = entry.get('audio')
                 display = '⬤ ' + title + (f' · {audio}' if audio else '')
                 item = QListWidgetItem(display)
-                item.setForeground(_COLOR_IDLE)
+                item.setForeground(COLOR_IDLE)
                 item.setData(Qt.ItemDataRole.UserRole, (ip, int(port), title))
                 self._stream_items[key] = item
                 self._streams_list.addItem(item)
@@ -2197,7 +1996,7 @@ class VulnCamWindow(QMainWindow):
         if config is None:
             return
         for _, item in visible:
-            item.setForeground(_COLOR_LAUNCHING)
+            item.setForeground(COLOR_LAUNCHING)
         matches = [key for key, _ in visible]
         args = self._make_args()
         self._running_source = 'connect_all'
@@ -2272,7 +2071,7 @@ class VulnCamWindow(QMainWindow):
         if config is None:
             return
         for _, item in visible:
-            item.setForeground(_COLOR_LAUNCHING)
+            item.setForeground(COLOR_LAUNCHING)
         matches = [key for key, _ in visible]
         args = self._make_args(leave_windows=False, stream_record=False,
                                check_only=False, generate_mosaic=True)
@@ -2292,7 +2091,7 @@ class VulnCamWindow(QMainWindow):
         for ip, port in selected_keys:
             item = self._stream_items.get((ip, port))
             if item:
-                item.setForeground(_COLOR_LAUNCHING)
+                item.setForeground(COLOR_LAUNCHING)
                 matches.append((ip, port))
         if not matches:
             return
@@ -2340,7 +2139,7 @@ class VulnCamWindow(QMainWindow):
             if item:
                 ip_d, port_d, _ = item.data(Qt.ItemDataRole.UserRole)
                 matches.append((ip_d, port_d))
-                item.setForeground(_COLOR_LAUNCHING)
+                item.setForeground(COLOR_LAUNCHING)
         if not matches:
             return
         self._apply_filter()
@@ -2543,8 +2342,8 @@ class VulnCamWindow(QMainWindow):
         self._on_stats_update(0, 0)
         # Any stream still orange (launched but never resolved) → mark as failed
         for key, item in self._stream_items.items():
-            if item.foreground().color() == _COLOR_LAUNCHING:
-                item.setForeground(_COLOR_FAILED)
+            if item.foreground().color() == COLOR_LAUNCHING:
+                item.setForeground(COLOR_FAILED)
                 cell = self._mosaic_cells.get(key)
                 if cell and cell.status() == 'launching':
                     cell.set_status('failed')
@@ -2587,7 +2386,7 @@ def main():
     app.setApplicationName('VulnCam')
     app.setDesktopFileName('vulncam')
     pixmap = QPixmap()
-    pixmap.loadFromData(base64.b64decode(_APP_ICON_B64))
+    pixmap.loadFromData(base64.b64decode(APP_ICON_B64))
     icon = QIcon(pixmap)
     app.setWindowIcon(icon)
     window = VulnCamWindow()
