@@ -251,29 +251,18 @@ class VulnCamWindow(QMainWindow):
         self.max_proc_spin.setRange(1, 50)
         self.max_proc_spin.setValue(DEFAULT_MAX_PROCS)
         pb_num_row.addWidget(self.max_proc_spin)
+        pb_num_row.addSpacing(16)
+        self._label_thumb_timeout = QLabel()
+        pb_num_row.addWidget(self._label_thumb_timeout)
+        self._thumb_timeout_spin = QSpinBox()
+        self._thumb_timeout_spin.setRange(5, 60)
+        self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
+        pb_num_row.addWidget(self._thumb_timeout_spin)
         pb_num_row.addStretch()
         self._stats_label = QLabel()
         pb_num_row.addWidget(self._stats_label)
         pb_layout.addLayout(pb_num_row)
         self.max_proc_spin.valueChanged.connect(lambda _: self._refresh_stats_label())
-
-        pb_check_row = QHBoxLayout()
-        self.record_check = QCheckBox()
-        self.leave_check  = QCheckBox()
-        for w in (self.record_check, self.leave_check):
-            pb_check_row.addWidget(w)
-        pb_check_row.addStretch()
-        pb_layout.addLayout(pb_check_row)
-
-        pb_scan_row = QHBoxLayout()
-        self._label_thumb_timeout = QLabel()
-        pb_scan_row.addWidget(self._label_thumb_timeout)
-        self._thumb_timeout_spin = QSpinBox()
-        self._thumb_timeout_spin.setRange(5, 60)
-        self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
-        pb_scan_row.addWidget(self._thumb_timeout_spin)
-        pb_scan_row.addStretch()
-        pb_layout.addLayout(pb_scan_row)
 
 
         # ── Shodan search group ───────────────────────────────────────────────
@@ -525,8 +514,6 @@ class VulnCamWindow(QMainWindow):
         self._label_ipgeo.setText(t['label_ipgeo_key'])
         self._playback_group.setTitle(t['group_playback'])
         self._label_max_proc.setText(t['label_max_proc'])
-        self.record_check.setText(t['check_record'])
-        self.leave_check.setText(t['check_leave'])
         self._label_thumb_timeout.setText(t['label_thumb_timeout'])
         self._dedup_check.setText(t['check_dedup'])
         self._search_group.setTitle(t['group_search'])
@@ -720,8 +707,6 @@ class VulnCamWindow(QMainWindow):
         self.pages_spin.setValue(DEFAULT_PAGES)
         self.max_proc_spin.setValue(DEFAULT_MAX_PROCS)
         self.random_check.setChecked(False)
-        self.record_check.setChecked(False)
-        self.leave_check.setChecked(False)
         self.allres_check.setChecked(False)
         self._dedup_check.setChecked(True)
         self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
@@ -900,10 +885,11 @@ class VulnCamWindow(QMainWindow):
             return
         self._connect_stream((ip, port), title)
 
-    def _connect_stream(self, key, title, force_record=None):
+    def _connect_stream(self, key, title, force_record=False):
         """Launch a direct MPV connection to (ip, port) — the mechanism behind both
-        double-click and the context menu's Connect actions. force_record overrides
-        the global "Record streams" checkbox for just this one connection."""
+        double-click and the context menu's Connect actions. Only records when
+        force_record is explicitly True (the context menu's "Connect and start
+        recording") — plain connect/double-click never records."""
         if key in self._stream_sessions:
             self._append_log(self._t('log_already_playing').format(title))
             return
@@ -913,8 +899,7 @@ class VulnCamWindow(QMainWindow):
             QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
                                 self._t('dlg_mpv_no_path'))
             return
-        record = self.record_check.isChecked() if force_record is None else force_record
-        record_path = self._new_recording_path(key) if record else None
+        record_path = self._new_recording_path(key) if force_record else None
         cmd = [mpv_path, f'--title={title}']
         if record_path:
             cmd.append(f'--stream-record={record_path}')
@@ -1037,7 +1022,7 @@ class VulnCamWindow(QMainWindow):
         data = item.data(Qt.ItemDataRole.UserRole) if item else None
         return data[2] if data else f'{key[0]}:{key[1]}'
 
-    def _connect_targets(self, keys, force_record=None):
+    def _connect_targets(self, keys, force_record=False):
         for key in keys:
             self._connect_stream(key, self._target_title(key), force_record=force_record)
 
@@ -1278,10 +1263,10 @@ class VulnCamWindow(QMainWindow):
         """Build the Namespace of run arguments, applying per-action overrides."""
         base = dict(
             random_pages  = False,
-            leave_windows = self.leave_check.isChecked(),
+            leave_windows = False,
             max_processes = self.max_proc_spin.value(),
             max_windows   = 9999,
-            stream_record = self.record_check.isChecked(),
+            stream_record = False,
             probe           = False,
             thumb_timeout   = self._thumb_timeout_spin.value(),
             verbose         = False,
@@ -1456,7 +1441,6 @@ class VulnCamWindow(QMainWindow):
         self._save_streams_btn.setEnabled(not running)
         self._list_radio.setEnabled(not running)
         self._mosaic_radio.setEnabled(not running)
-        self.record_check.setEnabled(not running)
 
     def eventFilter(self, obj, event):
         if (event.type() == QEvent.Type.KeyPress
@@ -1496,7 +1480,7 @@ class VulnCamWindow(QMainWindow):
         for _, item in visible:
             item.setForeground(COLOR_LAUNCHING)
         matches = [key for key, _ in visible]
-        args = self._make_args(leave_windows=False, stream_record=False, probe=True)
+        args = self._make_args(probe=True)
         self._running_source = 'scan_all'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
@@ -1529,7 +1513,7 @@ class VulnCamWindow(QMainWindow):
                 matches.append((ip, port))
         if not matches:
             return
-        args = self._make_args(leave_windows=False, stream_record=False, probe=True)
+        args = self._make_args(probe=True)
         self._running_source = 'scan_selected'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
