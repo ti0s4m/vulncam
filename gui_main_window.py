@@ -968,6 +968,11 @@ class VulnCamWindow(QMainWindow):
         self._show_stream_context_menu(key, global_pos)
 
     def _show_stream_context_menu(self, key, global_pos):
+        # The SAVED badge isn't backed by a filesystem watcher, so it can go stale
+        # if recordings are deleted from outside the app; revalidate it against
+        # disk right when the user is looking (the submenu below already does the
+        # same live check for its own contents).
+        self._refresh_stream_badge(key)
         targets = self._context_menu_targets(key)
         connectable = [k for k in targets if self._can_connect(k)]
         playing = [k for k in targets
