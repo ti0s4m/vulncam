@@ -7,7 +7,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter
 
-from gui_constants import COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, THUMB_W, THUMB_H
+from gui_constants import (
+    COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, THUMB_W, THUMB_H,
+)
 
 # ── Mosaic view ───────────────────────────────────────────────────────────────
 
@@ -54,10 +56,6 @@ class MosaicCell(QFrame):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._audio_badge.setVisible(False)
         self._session_badge = QLabel(self._img_lbl)
-        self._session_badge.setStyleSheet(
-            'background: rgba(0,0,0,170); color: #ffcc00;'
-            ' padding: 1px 4px; border-radius: 3px;'
-            ' font-size: 9px; font-weight: bold;')
         self._session_badge.setAttribute(
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._session_badge.setVisible(False)
@@ -179,12 +177,17 @@ class MosaicCell(QFrame):
         b.move(self._thumb_w - b.width() - 4,
                self._thumb_h - b.height() - 4)
 
-    def set_session_badge(self, text):
-        """Show a short play/record-state tag (e.g. 'PLAY', 'REC', 'SAVED') top-left,
-        or hide it when text is None."""
+    def set_session_badge(self, text, color=None):
+        """Show a short play/record-state tag (e.g. 'PLAY', 'REC', 'SAVED') top-left
+        in the given QColor, or hide it when text is None."""
         if not text:
             self._session_badge.setVisible(False)
             return
+        badge_color = (color or COLOR_IDLE).name()
+        self._session_badge.setStyleSheet(
+            f'background: rgba(0,0,0,170); color: {badge_color};'
+            ' padding: 1px 4px; border-radius: 3px;'
+            ' font-size: 9px; font-weight: bold;')
         self._session_badge.setText(text)
         self._session_badge.adjustSize()
         self._session_badge.setVisible(True)

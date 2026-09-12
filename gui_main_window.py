@@ -1366,12 +1366,24 @@ class VulnCamWindow(QMainWindow):
             return 'SAVED'
         return None
 
+    def _session_badge_color(self, key):
+        """Mosaic-only badge color: green while just watching, red the moment
+        recording is involved (headless or play+record), neutral for a saved-but-
+        inactive recording."""
+        session = self._stream_sessions.get(key)
+        if session:
+            return COLOR_FAILED if (session['headless'] or session['record_path']) \
+                else COLOR_WORKING
+        if self._recordings_for(key):
+            return COLOR_IDLE
+        return None
+
     def _refresh_stream_badge(self, key):
         """Recompute and apply the play/record badge for one stream, in both views."""
         badge = self._session_badge_text(key)
         cell = self._mosaic_cells.get(key)
         if cell:
-            cell.set_session_badge(badge)
+            cell.set_session_badge(badge, self._session_badge_color(key))
         item = self._stream_items.get(key)
         if item:
             data = item.data(Qt.ItemDataRole.UserRole)
