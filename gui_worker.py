@@ -13,6 +13,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from vulncam import VulnCam, REQUIRED_SECTION, DEFAULT_TIMEOUT, RESULTS_PER_PAGE, MAX_PAGES
 from gui_thumbnails import build_capture_cmd, capture_env, find_thumbnail_file
+from gui_constants import RECORDINGS_DIR
 
 _vulncam_logger = logging.getLogger('vulncam')
 
@@ -30,7 +31,7 @@ class GUIVulnCam(VulnCam):
         self.thumb_base_dir    = None    # set by worker before run()
         self.on_stream_added       = None
         self.on_stream_status      = None
-        self.on_window_opened      = None   # (pid) → called when live MPV window appears
+        self.on_window_opened      = None   # (pid, ip, port, record_path) → live MPV window appeared
         self.on_thumbnail_generated = None  # (ip, port, file_path) -> None
         self.should_skip_stream    = None
         self.on_stream_skipped     = None
@@ -104,7 +105,7 @@ class GUIVulnCam(VulnCam):
         if self.on_stream_status:
             self.on_stream_status(info['title'], 'working')
         if self.on_window_opened:
-            self.on_window_opened(pid)
+            self.on_window_opened(pid, info['ip'], info['port'], info.get('record_path') or '')
 
     def _on_stream_timeout(self, pid, info):
         if not info['working'] and self.on_stream_status:
@@ -241,6 +242,7 @@ class GUIVulnCam(VulnCam):
             title = '[%d] %s:%d (%s-%s-%s)' % tuple((idx + 1,) + match + location)
             _vulncam_logger.info(title)
             thumb_dir = None
+            record_path = None
             if self.probe:
                 thumb_dir = os.path.join(
                     self.thumb_base_dir or '', f'{match[0]}_{match[1]}')
@@ -249,10 +251,12 @@ class GUIVulnCam(VulnCam):
                 cmd = build_capture_cmd(mpv_path, match[0], match[1],
                                         thumb_file_path, self.thumb_timeout)
             elif self.stream_record:
+                folder = os.path.join(RECORDINGS_DIR, f'{match[0]}_{match[1]}')
+                os.makedirs(folder, exist_ok=True)
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-                mkv_file = '%s_%d.mkv' % (ts, idx + 1)
+                record_path = os.path.join(folder, f'{ts}.mkv')
                 cmd = [mpv_path, f'--title={title}',
-                       f'--stream-record={mkv_file}',
+                       f'--stream-record={record_path}',
                        'rtsp://%s:%d' % match, '--mute=yes']
             else:
                 cmd = [mpv_path, f'--title={title}',
@@ -271,6 +275,7 @@ class GUIVulnCam(VulnCam):
                 'ip': match[0],
                 'port': match[1],
                 'thumb_dir': thumb_dir,
+                'record_path': record_path,
             }
             time.sleep(0.2)
             self._check_working()  # detect new PID immediately → on_stream_added
@@ -307,7 +312,7 @@ class VulnCamWorker(QThread):
     stream_skipped      = pyqtSignal(str)
     stats_update        = pyqtSignal(int, int)
     thumbnail_generated = pyqtSignal(str, int, str)  # ip, port, file_path
-    window_opened       = pyqtSignal(int)             # pid
+    window_opened       = pyqtSignal(int, str, int, str)   # pid, ip, port, record_path ('' = none)
 
     def __init__(self, config, args, matches=None, skip_fn=None,
                  max_procs_ref=None, thumb_base_dir=None):

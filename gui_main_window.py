@@ -32,7 +32,7 @@ from vulncam import (
 from gui_i18n import TRANSLATIONS
 from gui_constants import (
     COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED,
-    THUMB_SIZES, MAX_THUMB_RETRIES,
+    THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR,
 )
 from gui_mosaic import MosaicGrid
 from gui_thumbnails import ThumbnailManager, AudioProbeTask
@@ -99,6 +99,7 @@ class VulnCamWindow(QMainWindow):
         self._running_source = None   # 'shodan' | 'connect_all' | 'connect_selected'
         self._last_stats = (0, 0)
         self._reconnect_pids = set()
+        self._stream_sessions = {}   # (ip, port) → {'pid', 'headless', 'record_path'}
         self._temp_dir = tempfile.mkdtemp(prefix='vulncam_thumbs_')
         self._thumb_manager = ThumbnailManager(
             self._temp_dir, lambda: self.max_proc_spin.value(), self)
@@ -895,6 +896,9 @@ class VulnCamWindow(QMainWindow):
         """Launch a direct MPV connection to (ip, port) — the mechanism behind both
         double-click and the context menu's Connect actions. force_record overrides
         the global "Record streams" checkbox for just this one connection."""
+        if key in self._stream_sessions:
+            self._append_log(self._t('log_already_playing').format(title))
+            return
         ip, port = key
         mpv_path = self.mpv_path.text().strip()
         if not mpv_path:
@@ -902,10 +906,10 @@ class VulnCamWindow(QMainWindow):
                                 self._t('dlg_mpv_no_path'))
             return
         record = self.record_check.isChecked() if force_record is None else force_record
+        record_path = self._new_recording_path(key) if record else None
         cmd = [mpv_path, f'--title={title}']
-        if record:
-            ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-            cmd.append(f'--stream-record={ts}_{ip}_{port}.mkv')
+        if record_path:
+            cmd.append(f'--stream-record={record_path}')
         cmd += [f'rtsp://{ip}:{port}', '--mute=yes']
         if sys.platform == 'linux':
             cmd.append('--gpu-context=x11egl')
@@ -923,7 +927,7 @@ class VulnCamWindow(QMainWindow):
         self._append_log(self._t('log_reconnect').format(title))
         self._reconnect_pids.add(proc.pid)
         self._refresh_stats_label()
-        self._watch_reconnect(title, ip, port, proc.pid)
+        self._watch_reconnect(title, ip, port, proc.pid, record_path=record_path)
 
     # ── Context menu (right-click on a stream, list or mosaic) ──────────────────
 
@@ -957,13 +961,17 @@ class VulnCamWindow(QMainWindow):
 
     def _show_stream_context_menu(self, key, global_pos):
         targets = self._context_menu_targets(key)
-        working_targets = [k for k in targets if self._stream_status(k) == 'working']
+        connectable = [k for k in targets if self._can_connect(k)]
+        playing = [k for k in targets
+                  if k in self._stream_sessions and not self._stream_sessions[k]['headless']]
 
         menu = QMenu(self)
         act_connect = menu.addAction(self._t('ctx_connect'))
-        act_connect.setEnabled(bool(working_targets))
+        act_connect.setEnabled(bool(connectable))
         act_record = menu.addAction(self._t('ctx_connect_record'))
-        act_record.setEnabled(bool(working_targets))
+        act_record.setEnabled(bool(connectable))
+        act_stop_playback = menu.addAction(self._t('ctx_stop_playback'))
+        act_stop_playback.setEnabled(bool(playing))
         menu.addSeparator()
         act_copy = menu.addAction(self._t('ctx_copy_rtsp'))
         menu.addSeparator()
@@ -972,20 +980,28 @@ class VulnCamWindow(QMainWindow):
 
         chosen = menu.exec(global_pos)
         if chosen is act_connect:
-            self._connect_targets(working_targets)
+            self._connect_targets(connectable)
         elif chosen is act_record:
-            self._connect_targets(working_targets, force_record=True)
+            self._connect_targets(connectable, force_record=True)
+        elif chosen is act_stop_playback:
+            self._stop_targets(playing)
         elif chosen is act_copy:
             self._copy_rtsp_links(targets)
         elif chosen is act_delete:
             self._delete_targets(targets)
 
+    def _target_title(self, key):
+        item = self._stream_items.get(key)
+        data = item.data(Qt.ItemDataRole.UserRole) if item else None
+        return data[2] if data else f'{key[0]}:{key[1]}'
+
     def _connect_targets(self, keys, force_record=None):
         for key in keys:
-            item = self._stream_items.get(key)
-            data = item.data(Qt.ItemDataRole.UserRole) if item else None
-            title = data[2] if data else f'{key[0]}:{key[1]}'
-            self._connect_stream(key, title, force_record=force_record)
+            self._connect_stream(key, self._target_title(key), force_record=force_record)
+
+    def _stop_targets(self, keys):
+        for key in keys:
+            self._stop_session(key, self._target_title(key))
 
     def _copy_rtsp_links(self, keys):
         urls = [f'rtsp://{ip}:{port}' for ip, port in keys]
@@ -999,7 +1015,7 @@ class VulnCamWindow(QMainWindow):
                 self._remove_stream(key, item)
         self._update_count()
 
-    def _watch_reconnect(self, title, ip, port, pid):
+    def _watch_reconnect(self, title, ip, port, pid, record_path=None):
         """Poll for the MPV window every second until it appears or timeout expires."""
         start = time.time()
 
@@ -1008,6 +1024,7 @@ class VulnCamWindow(QMainWindow):
                 # Keep counting the pid in Proc (like the batch path does) until
                 # _poll_live_mpv notices the process has actually exited.
                 self._add_live_mpv_pid(pid)
+                self._mark_session((ip, port), pid, record_path=record_path)
             else:
                 self._reconnect_pids.discard(pid)
             self._refresh_stats_label()
@@ -1203,21 +1220,70 @@ class VulnCamWindow(QMainWindow):
         cell = self._mosaic_cells.get(key)
         return cell.status() if cell else None
 
+    def _can_connect(self, key):
+        """Whether a NEW connection may be started for this stream: verified working,
+        and not already playing/recording (that's what "Stop playback" is for)."""
+        return self._stream_status(key) == 'working' and key not in self._stream_sessions
+
     def _refresh_connect_buttons(self):
         """Keep Connect all/selected enabled exactly when the context menu's Connect
-        would be: at least one target ('visible' / 'selected') is already 'working'.
+        would be: at least one target can actually be connected to right now.
         Never runs while a worker is active — _set_running owns button state then."""
         if self._running_source is not None:
             return
         visible_keys = [k for k, _ in self._visible_items()]
-        self._connect_btn.setEnabled(
-            any(self._stream_status(k) == 'working' for k in visible_keys))
+        self._connect_btn.setEnabled(any(self._can_connect(k) for k in visible_keys))
         self._connect_selected_btn.setEnabled(
-            any(self._stream_status(k) == 'working' for k in self._selected_keys()))
+            any(self._can_connect(k) for k in self._selected_keys()))
+
+    # ── Recording file layout: recordings/<ip>_<port>/<timestamp>.mkv ───────────
+
+    def _recording_folder(self, key):
+        ip, port = key
+        folder = os.path.join(RECORDINGS_DIR, f'{ip}_{port}')
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def _new_recording_path(self, key):
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        return os.path.join(self._recording_folder(key), f'{ts}.mkv')
+
+    def _recordings_for(self, key):
+        """Existing recordings for this stream, most recent first."""
+        folder = os.path.join(RECORDINGS_DIR, f'{key[0]}_{key[1]}')
+        if not os.path.isdir(folder):
+            return []
+        return sorted(glob.glob(os.path.join(folder, '*.mkv')), reverse=True)
+
+    # ── Per-stream session tracking (currently playing / recording) ────────────
+
+    def _mark_session(self, key, pid, headless=False, record_path=None):
+        self._stream_sessions[key] = {
+            'pid': pid, 'headless': headless, 'record_path': record_path,
+        }
+        self._live_mpv_timer.start()
+        self._refresh_connect_buttons()
+
+    def _end_session(self, key):
+        self._stream_sessions.pop(key, None)
+        self._refresh_connect_buttons()
+
+    def _stop_session(self, key, title):
+        session = self._stream_sessions.get(key)
+        if not session:
+            return
+        try:
+            psutil.Process(session['pid']).kill()
+        except Exception:
+            pass
+        headless = session['headless']
+        self._end_session(key)
+        log_key = 'log_recording_stopped' if headless else 'log_playback_stopped'
+        self._append_log(self._t(log_key).format(title))
 
     def _connect_all(self):
         visible = self._visible_items()
-        matches = [key for key, _ in visible if self._stream_status(key) == 'working']
+        matches = [key for key, _ in visible if self._can_connect(key)]
         if not matches:
             self._append_log(self._t('log_no_working_selected'))
             return
@@ -1354,7 +1420,7 @@ class VulnCamWindow(QMainWindow):
 
     def _connect_selected(self):
         selected_keys = self._selected_keys()
-        matches = [key for key in selected_keys if self._stream_status(key) == 'working']
+        matches = [key for key in selected_keys if self._can_connect(key)]
         if not matches:
             self._append_log(self._t('log_no_working_selected'))
             return
@@ -1416,14 +1482,20 @@ class VulnCamWindow(QMainWindow):
         A double-click connection stays in both _live_mpv_pids (Win) and
         _reconnect_pids (Proc) once confirmed working, so both are pruned here
         together — matching how the batch worker only drops a process from Proc
-        once it actually exits, not once its window is merely confirmed."""
+        once it actually exits, not once its window is merely confirmed.
+        Per-stream sessions (playing/recording) are pruned the same way, since a
+        headless recording has no window and would otherwise never get noticed."""
         dead_live = {pid for pid in self._live_mpv_pids if not self._pid_alive(pid)}
         dead_reconnect = {pid for pid in self._reconnect_pids if not self._pid_alive(pid)}
-        if dead_live or dead_reconnect:
+        dead_sessions = [key for key, s in self._stream_sessions.items()
+                        if not self._pid_alive(s['pid'])]
+        if dead_live or dead_reconnect or dead_sessions:
             self._live_mpv_pids -= dead_live
             self._reconnect_pids -= dead_reconnect
+            for key in dead_sessions:
+                self._end_session(key)
             self._refresh_stats_label()
-        if not self._live_mpv_pids and not self._reconnect_pids:
+        if not self._live_mpv_pids and not self._reconnect_pids and not self._stream_sessions:
             self._live_mpv_timer.stop()
 
     def _add_live_mpv_pid(self, pid):
@@ -1431,9 +1503,10 @@ class VulnCamWindow(QMainWindow):
         self._live_mpv_timer.start()
         self._refresh_stats_label()
 
-    @pyqtSlot(int)
-    def _on_worker_window_opened(self, pid):
+    @pyqtSlot(int, str, int, str)
+    def _on_worker_window_opened(self, pid, ip, port, record_path):
         self._add_live_mpv_pid(pid)
+        self._mark_session((ip, port), pid, record_path=record_path or None)
 
     def _on_view_mode_changed(self, _btn, checked):
         if not checked:

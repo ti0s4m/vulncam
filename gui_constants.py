@@ -1,4 +1,4 @@
-"""Constants shared between the mosaic widgets and the main window."""
+"""Small constants shared across gui_* modules."""
 from PyQt6.QtGui import QColor
 
 COLOR_IDLE      = QColor('#707070')
@@ -13,3 +13,5 @@ THUMB_SIZES = [
 ]
 THUMB_W, THUMB_H = THUMB_SIZES[1][1:]   # 16:9 medium (default)
 MAX_THUMB_RETRIES = 2
+
+RECORDINGS_DIR = 'recordings'   # per-stream subfolders live under this, relative to cwd
