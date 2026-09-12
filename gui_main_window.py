@@ -415,6 +415,7 @@ class VulnCamWindow(QMainWindow):
         self._filter_combo.addItem('', 'all')
         self._filter_combo.addItem('', 'working')
         self._filter_combo.addItem('', 'working_av')
+        self._filter_combo.addItem('', 'recording')
         self._filter_combo.addItem('', 'failed')
         self._filter_combo.addItem('', 'launching')
         self._filter_combo.setCurrentIndex(1)
@@ -538,8 +539,9 @@ class VulnCamWindow(QMainWindow):
         self._filter_combo.setItemText(0, t['filter_all'])
         self._filter_combo.setItemText(1, t['filter_working'])
         self._filter_combo.setItemText(2, t['filter_working_av'])
-        self._filter_combo.setItemText(3, t['filter_failed'])
-        self._filter_combo.setItemText(4, t['filter_launching'])
+        self._filter_combo.setItemText(3, t['filter_recording'])
+        self._filter_combo.setItemText(4, t['filter_failed'])
+        self._filter_combo.setItemText(5, t['filter_launching'])
         self._discard_check.setText(t['check_discard'])
         self._clear_btn.setText(t['btn_clear_streams'])
         self._clear_failed_btn.setText(t['btn_clear_failed'])
@@ -989,7 +991,12 @@ class VulnCamWindow(QMainWindow):
             menu.addSeparator()
             rec_menu = menu.addMenu(self._t('ctx_recordings_menu'))
             for path in recordings:
-                recording_actions[rec_menu.addAction(os.path.basename(path))] = path
+                try:
+                    size = self._format_size(os.path.getsize(path))
+                except OSError:
+                    size = '?'
+                label = f'{os.path.basename(path)} ({size})'
+                recording_actions[rec_menu.addAction(label)] = path
             rec_menu.addSeparator()
             act_open_folder = rec_menu.addAction(self._t('ctx_open_recordings_folder'))
 
@@ -1126,15 +1133,19 @@ class VulnCamWindow(QMainWindow):
         target = color_map.get(fval)
         for i in range(self._streams_list.count()):
             item = self._streams_list.item(i)
+            data = item.data(Qt.ItemDataRole.UserRole)
+            key = (data[0], data[1]) if data else None
             if fval == 'all':
                 hidden = False
             elif fval == 'working_av':
                 hidden = not (item.foreground().color() == COLOR_WORKING
                               and ' · AV' in item.text())
+            elif fval == 'recording':
+                session = self._stream_sessions.get(key) if key else None
+                hidden = not (session and session['record_path'])
             else:
                 hidden = bool(target and item.foreground().color() != target)
             item.setHidden(hidden)
-            data = item.data(Qt.ItemDataRole.UserRole)
             if data:
                 ip, port, _ = data
                 self._mosaic_grid.set_cell_visible(ip, port, not hidden)
@@ -1324,6 +1335,14 @@ class VulnCamWindow(QMainWindow):
             return []
         return sorted(glob.glob(os.path.join(folder, '*.mkv')), reverse=True)
 
+    @staticmethod
+    def _format_size(num_bytes):
+        size = float(num_bytes)
+        for unit in ('B', 'KB', 'MB', 'GB'):
+            if size < 1024 or unit == 'GB':
+                return f'{size:.0f}{unit}' if unit == 'B' else f'{size:.1f}{unit}'
+            size /= 1024
+
     # ── Per-stream session tracking (currently playing / recording) ────────────
 
     def _mark_session(self, key, pid, headless=False, record_path=None):
@@ -1333,20 +1352,31 @@ class VulnCamWindow(QMainWindow):
         self._live_mpv_timer.start()
         self._refresh_connect_buttons()
         self._refresh_stream_badge(key)
+        if record_path and self._filter_combo.currentData() == 'recording':
+            self._apply_filter()
 
     def _end_session(self, key):
         self._stream_sessions.pop(key, None)
         self._refresh_connect_buttons()
         self._refresh_stream_badge(key)
+        if self._filter_combo.currentData() == 'recording':
+            self._apply_filter()
 
     def _session_badge_text(self, key):
         """Short tag summarizing this stream's play/record state, or None for
-        nothing to show — same order of precedence in both list and mosaic."""
+        nothing to show — same order of precedence in both list and mosaic.
+        While actively recording, the tag also carries the file's current size
+        (refreshed once a second by _poll_live_mpv) so growth is visible live."""
         session = self._stream_sessions.get(key)
         if session:
-            if session['headless']:
-                return 'REC'
-            return 'PLAY·REC' if session['record_path'] else 'PLAY'
+            if not session['record_path']:
+                return 'PLAY'
+            base = 'REC' if session['headless'] else 'PLAY·REC'
+            try:
+                size = self._format_size(os.path.getsize(session['record_path']))
+            except OSError:
+                return base   # file not written yet
+            return f'{base} {size}'
         if self._recordings_for(key):
             return 'SAVED'
         return None
@@ -1607,6 +1637,10 @@ class VulnCamWindow(QMainWindow):
             for key in dead_sessions:
                 self._end_session(key)
             self._refresh_stats_label()
+        # Live-growing size on the REC/PLAY·REC badge for whatever is still recording.
+        for key, session in self._stream_sessions.items():
+            if session['record_path']:
+                self._refresh_stream_badge(key)
         if not self._live_mpv_pids and not self._reconnect_pids and not self._stream_sessions:
             self._live_mpv_timer.stop()
 
