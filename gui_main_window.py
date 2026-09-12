@@ -14,11 +14,11 @@ from datetime import datetime
 import psutil
 import shodan
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QLineEdit, QPushButton, QSpinBox, QCheckBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QSizePolicy, QComboBox,
     QSplitter, QListWidget, QListWidgetItem,
-    QRadioButton, QButtonGroup, QFrame,
+    QRadioButton, QButtonGroup, QFrame, QMenu,
 )
 from PyQt6.QtCore import (QThreadPool, Qt, QTimer, QEvent, pyqtSlot)
 from PyQt6.QtGui import QFont, QTextCursor, QPixmap
@@ -470,11 +470,15 @@ class VulnCamWindow(QMainWindow):
             QListWidget.SelectionMode.ExtendedSelection)
         self._streams_list.itemDoubleClicked.connect(self._on_stream_double_clicked)
         self._streams_list.installEventFilter(self)
+        self._streams_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._streams_list.customContextMenuRequested.connect(self._on_list_context_menu)
         sg_layout.addWidget(self._streams_list)
 
         self._mosaic_grid = MosaicGrid()
         self._mosaic_grid.cell_double_clicked.connect(
             self._on_mosaic_cell_double_clicked)
+        self._mosaic_grid.cell_context_menu_requested.connect(
+            self._on_mosaic_context_menu)
         self._mosaic_grid.setVisible(False)
         self._mosaic_grid.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._mosaic_grid.installEventFilter(self)
@@ -879,13 +883,21 @@ class VulnCamWindow(QMainWindow):
         if self._stream_status((ip, port)) != 'working':
             self._append_log(self._t('log_not_verified').format(title))
             return
+        self._connect_stream((ip, port), title)
+
+    def _connect_stream(self, key, title, force_record=None):
+        """Launch a direct MPV connection to (ip, port) — the mechanism behind both
+        double-click and the context menu's Connect actions. force_record overrides
+        the global "Record streams" checkbox for just this one connection."""
+        ip, port = key
         mpv_path = self.mpv_path.text().strip()
         if not mpv_path:
             QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
                                 self._t('dlg_mpv_no_path'))
             return
+        record = self.record_check.isChecked() if force_record is None else force_record
         cmd = [mpv_path, f'--title={title}']
-        if self.record_check.isChecked():
+        if record:
             ts = datetime.now().strftime('%Y%m%d_%H%M%S')
             cmd.append(f'--stream-record={ts}_{ip}_{port}.mkv')
         cmd += [f'rtsp://{ip}:{port}', '--mute=yes']
@@ -899,11 +911,87 @@ class VulnCamWindow(QMainWindow):
                                  self._t('dlg_mpv_err_msg').format(e))
             return
         # Only set orange (and log) once we know the process started
-        item.setForeground(COLOR_LAUNCHING)
+        item = self._stream_items.get(key)
+        if item:
+            item.setForeground(COLOR_LAUNCHING)
         self._append_log(self._t('log_reconnect').format(title))
         self._reconnect_pids.add(proc.pid)
         self._refresh_stats_label()
         self._watch_reconnect(title, ip, port, proc.pid)
+
+    # ── Context menu (right-click on a stream, list or mosaic) ──────────────────
+
+    def _context_menu_targets(self, key):
+        """Keys a context menu invoked on `key` should act on: the whole current
+        selection if `key` is part of a multi-selection, otherwise just `key`."""
+        selected = self._selected_keys()
+        if key in selected and len(selected) > 1:
+            return selected
+        return [key]
+
+    def _on_list_context_menu(self, pos):
+        item = self._streams_list.itemAt(pos)
+        if not item:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        key = (data[0], data[1])
+        if key not in self._selected_keys():
+            self._streams_list.clearSelection()
+            item.setSelected(True)
+            self._streams_list.setCurrentItem(item)
+        self._show_stream_context_menu(key, self._streams_list.viewport().mapToGlobal(pos))
+
+    def _on_mosaic_context_menu(self, ip, port, global_pos):
+        key = (ip, port)
+        if key not in self._selected_keys():
+            self._mosaic_grid.select_only(ip, port)
+        self._show_stream_context_menu(key, global_pos)
+
+    def _show_stream_context_menu(self, key, global_pos):
+        targets = self._context_menu_targets(key)
+        working_targets = [k for k in targets if self._stream_status(k) == 'working']
+
+        menu = QMenu(self)
+        act_connect = menu.addAction(self._t('ctx_connect'))
+        act_connect.setEnabled(bool(working_targets))
+        act_record = menu.addAction(self._t('ctx_connect_record'))
+        act_record.setEnabled(bool(working_targets))
+        menu.addSeparator()
+        act_copy = menu.addAction(self._t('ctx_copy_rtsp'))
+        menu.addSeparator()
+        act_delete = menu.addAction(self._t('ctx_delete'))
+        act_delete.setEnabled(self._running_source is None)
+
+        chosen = menu.exec(global_pos)
+        if chosen is act_connect:
+            self._connect_targets(working_targets)
+        elif chosen is act_record:
+            self._connect_targets(working_targets, force_record=True)
+        elif chosen is act_copy:
+            self._copy_rtsp_links(targets)
+        elif chosen is act_delete:
+            self._delete_targets(targets)
+
+    def _connect_targets(self, keys, force_record=None):
+        for key in keys:
+            item = self._stream_items.get(key)
+            data = item.data(Qt.ItemDataRole.UserRole) if item else None
+            title = data[2] if data else f'{key[0]}:{key[1]}'
+            self._connect_stream(key, title, force_record=force_record)
+
+    def _copy_rtsp_links(self, keys):
+        urls = [f'rtsp://{ip}:{port}' for ip, port in keys]
+        QApplication.clipboard().setText('\n'.join(urls))
+        self._append_log(self._t('log_rtsp_copied').format(', '.join(urls)))
+
+    def _delete_targets(self, keys):
+        for key in keys:
+            item = self._stream_items.get(key)
+            if item:
+                self._remove_stream(key, item)
+        self._update_count()
 
     def _watch_reconnect(self, title, ip, port, pid):
         """Poll for the MPV window every second until it appears or timeout expires."""

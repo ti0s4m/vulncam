@@ -4,7 +4,7 @@ import sys
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel, QFrame, QScrollArea, QGridLayout,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter
 
 from gui_constants import COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, THUMB_W, THUMB_H
@@ -14,6 +14,7 @@ from gui_constants import COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, THUMB_W,
 class MosaicCell(QFrame):
     double_clicked = pyqtSignal(str, int, str)   # ip, port, title
     clicked        = pyqtSignal(str, int)         # ip, port
+    context_menu_requested = pyqtSignal(str, int, QPoint)   # ip, port, global pos
 
     def __init__(self, ip, port, title, connect_text, no_signal_text,
                  waiting_text='Idle', working_text='Working',
@@ -226,6 +227,9 @@ class MosaicCell(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self._ip, self._port)
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.context_menu_requested.emit(
+                self._ip, self._port, event.globalPosition().toPoint())
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -235,6 +239,7 @@ class MosaicCell(QFrame):
 
 class MosaicGrid(QScrollArea):
     cell_double_clicked = pyqtSignal(str, int, str)
+    cell_context_menu_requested = pyqtSignal(str, int, QPoint)
     selection_changed   = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -268,6 +273,7 @@ class MosaicGrid(QScrollArea):
                           parent=self._container)
         cell.double_clicked.connect(self.cell_double_clicked)
         cell.clicked.connect(self._on_cell_clicked)
+        cell.context_menu_requested.connect(self.cell_context_menu_requested)
         self._cells[key] = cell
         self._order.append(key)
         self._timer.start()
@@ -293,6 +299,14 @@ class MosaicGrid(QScrollArea):
 
     def selected_keys(self):
         return list(self._selected)
+
+    def select_only(self, ip, port):
+        """Select exactly this cell, deselecting everything else (right-click UX)."""
+        key = (ip, port)
+        for k, c in self._cells.items():
+            c.set_selected(k == key)
+        self._selected = {key}
+        self.selection_changed.emit()
 
     def clear_selection(self):
         for key in list(self._selected):
