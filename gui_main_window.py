@@ -336,6 +336,7 @@ class VulnCamWindow(QMainWindow):
         search_layout.addLayout(shodan_opt_row)
 
         ll.addWidget(self._search_group)
+        ll.addWidget(self._playback_group)
 
         btn_row = QHBoxLayout()
         self._restore_btn = QPushButton()
@@ -364,8 +365,15 @@ class VulnCamWindow(QMainWindow):
         rl = QVBoxLayout(right)
         rl.setContentsMargins(4, 0, 0, 0)
 
-        self._streams_group = QGroupBox()
+        self._streams_group = QWidget()
         sg_layout = QVBoxLayout(self._streams_group)
+        sg_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._streams_title = QLabel()
+        self._streams_title.setStyleSheet(
+            'font-weight: 600; font-size: 13px; padding-bottom: 4px;'
+            ' border-bottom: 1px solid palette(mid);')
+        sg_layout.addWidget(self._streams_title)
 
         # View mode toggle (list / mosaic)
         view_row = QHBoxLayout()
@@ -454,14 +462,13 @@ class VulnCamWindow(QMainWindow):
         self._mosaic_grid.installEventFilter(self)
         sg_layout.addWidget(self._mosaic_grid)
 
-        rl.addWidget(self._playback_group)
         rl.addWidget(self._streams_group)
 
         splitter.addWidget(left)
         splitter.addWidget(right)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([600, 600])
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
+        splitter.setSizes([440, 660])
         root.addWidget(splitter)
 
         self._retranslate()
@@ -503,7 +510,7 @@ class VulnCamWindow(QMainWindow):
         self.start_btn.setText(t['btn_start'])
         self.stop_btn.setText(t['btn_stop'])
         self._refresh_stats_label()
-        self._streams_group.setTitle(t['group_streams'])
+        self._streams_title.setText(t['group_streams'])
         self._label_filter.setText(t['label_filter'])
         self._filter_combo.setItemText(0, t['filter_all'])
         self._filter_combo.setItemText(1, t['filter_working'])
