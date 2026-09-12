@@ -124,6 +124,10 @@ def list_window_titles():
 
 class VulnCam:
     def __init__(self, config, args):
+        self._init_state(config, args)
+        signal.signal(signal.SIGINT, self._sigint_handler)
+
+    def _init_state(self, config, args):
         self.config        = config
         self.random_pages  = args.random_pages
         self.leave_windows = args.leave_windows
@@ -137,31 +141,43 @@ class VulnCam:
         self._last_geo_request = 0.0
 
         self.api = shodan.Shodan(config[REQUIRED_SECTION]['shodanapikey'])
-        signal.signal(signal.SIGINT, self._sigint_handler)
+
+    def _kill_unfinished_processes(self):
+        for pid in list(self.processes):
+            if not self.leave_windows or not self.processes[pid]['working']:
+                try:
+                    self.processes[pid]['process'].kill()
+                except Exception:
+                    pass
+                self.processes.pop(pid, None)
 
     def _sigint_handler(self, _signum, _frame):
         self.signal_received = True
         logger.info('\nKilling active processes...')
-        for pid in list(self.processes):
-            if not self.leave_windows or not self.processes[pid]['working']:
-                self.processes[pid]['process'].kill()
-                self.processes.pop(pid)
+        self._kill_unfinished_processes()
         sys.exit(RC_SIGINT)
 
     def _active_processes(self):
         """Checks active processes and removes zombies or dead entries from the process table."""
         cnt = 0
         for pid in list(self.processes):
+            info = self.processes[pid]
             try:
                 p = psutil.Process(pid)
                 if p.status() == psutil.STATUS_ZOMBIE:
-                    self.processes[pid]['process'].kill()
+                    info['process'].kill()
                     del self.processes[pid]
+                    self._on_process_removed(info)
                 else:
                     cnt += 1
             except psutil.NoSuchProcess:
                 del self.processes[pid]
+                self._on_process_removed(info)
         return cnt
+
+    def _on_process_removed(self, info):
+        """Hook: called after a zombie/dead process is dropped. No-op by default."""
+        pass
 
     def _get_current_windows(self):
         return list_window_titles()
@@ -174,21 +190,33 @@ class VulnCam:
         """
         if sys.platform != 'linux':
             return 0
+        return self._scan_window_status()
+
+    def _scan_window_status(self):
         current_windows = self._get_current_windows()
         now = time.time()
         cnt_working = 0
         for pid in list(self.processes):
-            title = self.processes[pid]['title']
+            info = self.processes[pid]
+            title = info['title']
             if title in current_windows:
-                if not self.processes[pid]['working']:
+                if not info['working']:
                     logger.debug('%s is working :)', title)
-                self.processes[pid]['working'] = True
+                    self._on_stream_working(pid, info)
+                info['working'] = True
                 cnt_working += 1
-            elif (now - self.processes[pid]['launch_time']) >= DEFAULT_TIMEOUT:
+            elif (now - info['launch_time']) >= DEFAULT_TIMEOUT:
                 logger.debug('Killing %s as it is not working.', title)
-                self.processes[pid]['process'].kill()
+                info['process'].kill()
                 self.processes.pop(pid)
+                self._on_stream_timeout(pid, info)
         return cnt_working
+
+    def _on_stream_working(self, pid, info):
+        pass
+
+    def _on_stream_timeout(self, pid, info):
+        pass
 
     # ip-api.com free tier: 45 req/min → 1 req every ~1.4s
     _GEO_MIN_INTERVAL = 1.4

@@ -793,16 +793,7 @@ class GUIVulnCam(VulnCam):
     """VulnCam for GUI: no signal.signal setup, no sys.exit, status callbacks."""
 
     def __init__(self, config, args):
-        self.config        = config
-        self.random_pages  = args.random_pages
-        self.leave_windows = args.leave_windows
-        self.max_processes = args.max_processes
-        self.stream_record = args.stream_record
-        self.processes       = {}
-        self.signal_received = False
-        self._geo_cache        = {}
-        self._last_geo_request = 0.0
-        self.api = shodan.Shodan(config[REQUIRED_SECTION]['shodanapikey'])
+        self._init_state(config, args)
         self._known_pids      = set()
         self.check_only        = args.check_only
         self.probe_seconds     = args.probe_seconds
@@ -822,35 +813,18 @@ class GUIVulnCam(VulnCam):
 
     def _sigint_handler(self, _signum, _frame):
         self.signal_received = True
-        for pid in list(self.processes):
-            if not self.leave_windows or not self.processes[pid]['working']:
-                try:
-                    self.processes[pid]['process'].kill()
-                except Exception:
-                    pass
-                self.processes.pop(pid, None)
+        self._kill_unfinished_processes()
 
     def _active_processes(self):
         if self.check_only or self.generate_mosaic:
             # Silent modes: just count; _check_working handles cleanup
             return sum(1 for info in self.processes.values()
                        if info['process'].poll() is None)
-        cnt = 0
-        for pid in list(self.processes):
-            try:
-                p = psutil.Process(pid)
-                if p.status() == psutil.STATUS_ZOMBIE:
-                    info = self.processes.pop(pid)
-                    info['process'].kill()
-                    if not info['working'] and self.on_stream_status:
-                        self.on_stream_status(info['title'], 'failed')
-                else:
-                    cnt += 1
-            except psutil.NoSuchProcess:
-                info = self.processes.pop(pid)
-                if not info['working'] and self.on_stream_status:
-                    self.on_stream_status(info['title'], 'failed')
-        return cnt
+        return super()._active_processes()
+
+    def _on_process_removed(self, info):
+        if not info['working'] and self.on_stream_status:
+            self.on_stream_status(info['title'], 'failed')
 
     def _check_working(self):
         # Detect new PIDs in both modes
@@ -933,30 +907,20 @@ class GUIVulnCam(VulnCam):
                 self.on_stats_update(len(self.processes), 0)
             return 0
 
-        current_windows = list_window_titles()
-        now = time.time()
-        cnt_working = 0
-        for pid in list(self.processes):
-            title = self.processes[pid]['title']
-            if title in current_windows:
-                if not self.processes[pid]['working']:
-                    _vulncam_logger.debug('%s is working :)', title)
-                    if self.on_stream_status:
-                        self.on_stream_status(title, 'working')
-                    if self.on_window_opened:
-                        self.on_window_opened(pid)
-                self.processes[pid]['working'] = True
-                cnt_working += 1
-            elif (now - self.processes[pid]['launch_time']) >= DEFAULT_TIMEOUT:
-                was_working = self.processes[pid]['working']
-                _vulncam_logger.debug('Killing %s as it is not working.', title)
-                self.processes[pid]['process'].kill()
-                self.processes.pop(pid)
-                if not was_working and self.on_stream_status:
-                    self.on_stream_status(title, 'failed')
+        cnt_working = self._scan_window_status()
         if self.on_stats_update:
             self.on_stats_update(len(self.processes), cnt_working)
         return cnt_working
+
+    def _on_stream_working(self, pid, info):
+        if self.on_stream_status:
+            self.on_stream_status(info['title'], 'working')
+        if self.on_window_opened:
+            self.on_window_opened(pid)
+
+    def _on_stream_timeout(self, pid, info):
+        if not info['working'] and self.on_stream_status:
+            self.on_stream_status(info['title'], 'failed')
 
     @staticmethod
     def _shodan_geo(result):
