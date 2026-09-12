@@ -4,6 +4,4 @@
 ti0s4m.ini
 config.ini
 test_vulncam.py
-__pycache__/test_vulncam.cpython-312.pyc
-__pycache__/vulncam.cpython-312.pyc
-__pycache__/gui.cpython-312.pyc
+__pycache__/*
