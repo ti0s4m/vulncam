@@ -1315,8 +1315,11 @@ class VulnCamWindow(QMainWindow):
     # ── Recording file layout: recordings/<ip>_<port>/<timestamp>.mkv ───────────
 
     def _recording_folder(self, key):
+        # Absolute path: QDesktopServices/QUrl.fromLocalFile() need one to build a
+        # valid file:// URI — a relative one produces a malformed URI that gio/
+        # xdg-open reject ("Operation not supported").
         ip, port = key
-        folder = os.path.join(RECORDINGS_DIR, f'{ip}_{port}')
+        folder = os.path.abspath(os.path.join(RECORDINGS_DIR, f'{ip}_{port}'))
         os.makedirs(folder, exist_ok=True)
         return folder
 
@@ -1326,7 +1329,7 @@ class VulnCamWindow(QMainWindow):
 
     def _recordings_for(self, key):
         """Existing recordings for this stream, most recent first."""
-        folder = os.path.join(RECORDINGS_DIR, f'{key[0]}_{key[1]}')
+        folder = os.path.abspath(os.path.join(RECORDINGS_DIR, f'{key[0]}_{key[1]}'))
         if not os.path.isdir(folder):
             return []
         return sorted(glob.glob(os.path.join(folder, '*.mkv')), reverse=True)

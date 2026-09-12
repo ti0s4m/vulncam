@@ -251,7 +251,11 @@ class GUIVulnCam(VulnCam):
                 cmd = build_capture_cmd(mpv_path, match[0], match[1],
                                         thumb_file_path, self.thumb_timeout)
             elif self.stream_record:
-                folder = os.path.join(RECORDINGS_DIR, f'{match[0]}_{match[1]}')
+                # Absolute path: must match what VulnCamWindow._recording_folder()
+                # computes (also absolute), since the GUI later opens these files
+                # via QUrl.fromLocalFile(), which needs an absolute path.
+                folder = os.path.abspath(
+                    os.path.join(RECORDINGS_DIR, f'{match[0]}_{match[1]}'))
                 os.makedirs(folder, exist_ok=True)
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 record_path = os.path.join(folder, f'{ts}.mkv')
