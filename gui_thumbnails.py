@@ -9,6 +9,31 @@ from PyQt6.QtGui import QPixmap
 
 # ── Thumbnail generation ───────────────────────────────────────────────────────
 
+def build_capture_cmd(mpv_path, ip, port, thumb_file, timeout):
+    """mpv command that decodes and saves a single video frame to thumb_file."""
+    return [mpv_path, f'rtsp://{ip}:{port}',
+            f'-o={thumb_file}', '--ovc=png', '--frames=1',
+            '--really-quiet', '--no-terminal', f'--end={timeout}']
+
+
+def capture_env():
+    """Env with DISPLAY/WAYLAND_DISPLAY stripped on Linux so mpv can't open a window
+    even if a display is already active (e.g. other MPV windows are open)."""
+    if sys.platform == 'linux':
+        env = os.environ.copy()
+        env.pop('DISPLAY', None)
+        env.pop('WAYLAND_DISPLAY', None)
+        return env
+    return None
+
+
+def find_thumbnail_file(thumb_dir):
+    candidate = os.path.join(thumb_dir, 'thumb.png')
+    if os.path.isfile(candidate) and os.path.getsize(candidate) > 0:
+        return candidate
+    return None
+
+
 class ThumbnailWorker(QThread):
     done = pyqtSignal(str, int, str)   # ip, port, thumb_file_path ('' = failed)
 
@@ -32,26 +57,20 @@ class ThumbnailWorker(QThread):
     def run(self):
         os.makedirs(self._thumb_dir, exist_ok=True)
         thumb = os.path.join(self._thumb_dir, 'thumb.png')
-        cmd = [self._mpv_path, f'rtsp://{self._ip}:{self._port}',
-               f'-o={thumb}', '--ovc=png', '--frames=1',
-               '--really-quiet', '--no-terminal']
-        # Strip display vars so MPV cannot open any window even if a
-        # display is already active (e.g. other MPV windows are open)
-        env = os.environ.copy()
-        if sys.platform == 'linux':
-            env.pop('DISPLAY', None)
-            env.pop('WAYLAND_DISPLAY', None)
+        cmd = build_capture_cmd(self._mpv_path, self._ip, self._port,
+                                thumb, self._timeout)
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                          stderr=subprocess.DEVNULL, env=env)
+                                          stderr=subprocess.DEVNULL, env=capture_env())
             try:
                 self._proc.wait(timeout=self._timeout)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
                 self.done.emit(self._ip, self._port, '')
                 return
-            if os.path.isfile(thumb) and os.path.getsize(thumb) > 0:
-                self.done.emit(self._ip, self._port, thumb)
+            thumb_file = find_thumbnail_file(self._thumb_dir)
+            if thumb_file:
+                self.done.emit(self._ip, self._port, thumb_file)
                 return
         except Exception:
             pass

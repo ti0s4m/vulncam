@@ -12,6 +12,7 @@ import shodan
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from vulncam import VulnCam, REQUIRED_SECTION, DEFAULT_TIMEOUT, RESULTS_PER_PAGE, MAX_PAGES
+from gui_thumbnails import build_capture_cmd, capture_env, find_thumbnail_file
 
 _vulncam_logger = logging.getLogger('vulncam')
 
@@ -22,9 +23,7 @@ class GUIVulnCam(VulnCam):
     def __init__(self, config, args):
         self._init_state(config, args)
         self._known_pids      = set()
-        self.check_only        = args.check_only
-        self.probe_seconds     = args.probe_seconds
-        self.generate_mosaic   = getattr(args, 'generate_mosaic', False)
+        self.probe             = getattr(args, 'probe', False)
         self.thumb_timeout     = getattr(args, 'thumb_timeout', DEFAULT_TIMEOUT)
         self.shodan_plan       = getattr(args, 'shodan_plan', '')
         self._log_dev_plan_limit = getattr(args, 'log_dev_plan_limit', '')
@@ -43,8 +42,8 @@ class GUIVulnCam(VulnCam):
         self._kill_unfinished_processes()
 
     def _active_processes(self):
-        if self.check_only or self.generate_mosaic:
-            # Silent modes: just count; _check_working handles cleanup
+        if self.probe:
+            # Silent mode: just count; _check_working handles cleanup
             return sum(1 for info in self.processes.values()
                        if info['process'].poll() is None)
         return super()._active_processes()
@@ -61,36 +60,7 @@ class GUIVulnCam(VulnCam):
                 if self.on_stream_added:
                     self.on_stream_added(info['title'])
 
-        if self.check_only:
-            now = time.time()
-            for pid in list(self.processes):
-                info = self.processes[pid]
-                ret = info['process'].poll()
-                elapsed = now - info['launch_time']
-                if ret is not None:
-                    self.processes.pop(pid)
-                    # exit 0 + ran for (probe - 2) seconds or more → working
-                    if ret == 0 and elapsed >= (self.probe_seconds - 2):
-                        _vulncam_logger.debug('%s is working (exit 0, %.1fs)', info['title'], elapsed)
-                        if self.on_stream_status:
-                            self.on_stream_status(info['title'], 'working')
-                    else:
-                        if self.on_stream_status:
-                            self.on_stream_status(info['title'], 'failed')
-                elif elapsed > (self.probe_seconds + 15):
-                    # Safety kill for hung processes
-                    try:
-                        info['process'].kill()
-                    except Exception:
-                        pass
-                    self.processes.pop(pid)
-                    if self.on_stream_status:
-                        self.on_stream_status(info['title'], 'failed')
-            if self.on_stats_update:
-                self.on_stats_update(len(self.processes), 0)
-            return 0  # no visible windows in check-only mode
-
-        if self.generate_mosaic:
+        if self.probe:
             now = time.time()
             for pid in list(self.processes):
                 info = self.processes[pid]
@@ -100,16 +70,7 @@ class GUIVulnCam(VulnCam):
                     thumb_dir = info.get('thumb_dir', '')
                     # MPV may exit non-zero even when the frame was saved;
                     # check file existence rather than relying on exit code.
-                    thumb_file = None
-                    if thumb_dir:
-                        # Encode mode outputs thumb.png; fallback for old --vo=image names
-                        for name in ('thumb.png', '00000001.png',
-                                     '00000001.jpg', '00000001.webp'):
-                            candidate = os.path.join(thumb_dir, name)
-                            if os.path.isfile(candidate) \
-                                    and os.path.getsize(candidate) > 0:
-                                thumb_file = candidate
-                                break
+                    thumb_file = find_thumbnail_file(thumb_dir) if thumb_dir else None
                     _vulncam_logger.debug(
                         '%s thumbnail exit=%s file=%s', info['title'], ret,
                         thumb_file or 'none')
@@ -132,7 +93,7 @@ class GUIVulnCam(VulnCam):
                         self.on_stream_status(info['title'], 'failed')
             if self.on_stats_update:
                 self.on_stats_update(len(self.processes), 0)
-            return 0
+            return 0  # no visible windows in probe mode
 
         cnt_working = self._scan_window_status()
         if self.on_stats_update:
@@ -280,21 +241,13 @@ class GUIVulnCam(VulnCam):
             title = '[%d] %s:%d (%s-%s-%s)' % tuple((idx + 1,) + match + location)
             _vulncam_logger.info(title)
             thumb_dir = None
-            if self.check_only:
-                cmd = [mpv_path,
-                       '--vo=null', '--ao=null',
-                       '--end=%d' % self.probe_seconds,
-                       '--really-quiet', '--no-terminal', '--force-window=no',
-                       'rtsp://%s:%d' % match]
-            elif self.generate_mosaic:
+            if self.probe:
                 thumb_dir = os.path.join(
                     self.thumb_base_dir or '', f'{match[0]}_{match[1]}')
                 os.makedirs(thumb_dir, exist_ok=True)
                 thumb_file_path = os.path.join(thumb_dir, 'thumb.png')
-                cmd = [mpv_path, f'rtsp://{match[0]}:{match[1]}',
-                       f'-o={thumb_file_path}', '--ovc=png', '--frames=1',
-                       '--really-quiet', '--no-terminal',
-                       f'--end={self.thumb_timeout}']
+                cmd = build_capture_cmd(mpv_path, match[0], match[1],
+                                        thumb_file_path, self.thumb_timeout)
             elif self.stream_record:
                 ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                 mkv_file = '%s_%d.mkv' % (ts, idx + 1)
@@ -304,14 +257,9 @@ class GUIVulnCam(VulnCam):
             else:
                 cmd = [mpv_path, f'--title={title}',
                        'rtsp://%s:%d' % match, '--mute=yes']
-            if not self.check_only and not self.generate_mosaic \
-                    and sys.platform == 'linux':
+            if not self.probe and sys.platform == 'linux':
                 cmd.append('--gpu-context=x11egl')
-            popen_env = None
-            if self.generate_mosaic and sys.platform == 'linux':
-                popen_env = os.environ.copy()
-                popen_env.pop('DISPLAY', None)
-                popen_env.pop('WAYLAND_DISPLAY', None)
+            popen_env = capture_env() if self.probe else None
             mpv_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                         stderr=subprocess.STDOUT,
                                         env=popen_env)
@@ -329,7 +277,7 @@ class GUIVulnCam(VulnCam):
 
         if self.signal_received:
             return
-        if not self.check_only and not self.generate_mosaic and self.leave_windows:
+        if not self.probe and self.leave_windows:
             while not self.signal_received and \
                     self._active_processes() > self._check_working():
                 time.sleep(1)

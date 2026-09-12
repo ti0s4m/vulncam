@@ -38,8 +38,6 @@ from gui_mosaic import MosaicGrid
 from gui_thumbnails import ThumbnailManager, AudioProbeTask
 from gui_worker import VulnCamWorker
 
-PROBE_DEFAULT = 10
-
 
 QUERY_PRESETS = [
     ('RTSP + screenshot',  'RTSP has_screenshot:yes'),
@@ -241,26 +239,13 @@ class VulnCamWindow(QMainWindow):
         pb_layout.addLayout(pb_check_row)
 
         pb_scan_row = QHBoxLayout()
-        self._check_only_check = QCheckBox()
-        pb_scan_row.addWidget(self._check_only_check)
-        pb_scan_row.addSpacing(8)
-        self._label_probe = QLabel()
-        pb_scan_row.addWidget(self._label_probe)
-        self._probe_spin = QSpinBox()
-        self._probe_spin.setRange(5, 60)
-        self._probe_spin.setValue(PROBE_DEFAULT)
-        self._probe_spin.setEnabled(True)
-        pb_scan_row.addWidget(self._probe_spin)
-        pb_scan_row.addStretch()
         self._label_thumb_timeout = QLabel()
         pb_scan_row.addWidget(self._label_thumb_timeout)
         self._thumb_timeout_spin = QSpinBox()
         self._thumb_timeout_spin.setRange(5, 60)
         self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
         pb_scan_row.addWidget(self._thumb_timeout_spin)
-        self._check_only_check.setChecked(True)
-        self._check_only_check.toggled.connect(self._probe_spin.setEnabled)
-        self._check_only_check.toggled.connect(self._label_probe.setEnabled)
+        pb_scan_row.addStretch()
         pb_layout.addLayout(pb_scan_row)
 
 
@@ -443,10 +428,8 @@ class VulnCamWindow(QMainWindow):
         self._connect_selected_btn = QPushButton()
         self._connect_selected_btn.clicked.connect(self._on_connect_selected_clicked)
         self._scan_btn = QPushButton()
-        self._scan_btn.setVisible(False)
         self._scan_btn.clicked.connect(self._on_scan_btn_clicked)
         self._scan_selected_btn = QPushButton()
-        self._scan_selected_btn.setVisible(False)
         self._scan_selected_btn.clicked.connect(self._on_scan_selected_btn_clicked)
         for w in (self._connect_btn, self._connect_selected_btn,
                   self._scan_btn, self._scan_selected_btn):
@@ -501,8 +484,6 @@ class VulnCamWindow(QMainWindow):
         self._label_max_proc.setText(t['label_max_proc'])
         self.record_check.setText(t['check_record'])
         self.leave_check.setText(t['check_leave'])
-        self._check_only_check.setText(t['check_only'])
-        self._label_probe.setText(t['label_probe'])
         self._label_thumb_timeout.setText(t['label_thumb_timeout'])
         self._dedup_check.setText(t['check_dedup'])
         self._search_group.setTitle(t['group_search'])
@@ -694,8 +675,6 @@ class VulnCamWindow(QMainWindow):
         self.leave_check.setChecked(False)
         self.allres_check.setChecked(False)
         self._dedup_check.setChecked(True)
-        self._check_only_check.setChecked(True)
-        self._probe_spin.setValue(PROBE_DEFAULT)
         self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
         self._discard_check.setChecked(False)
         self._filter_combo.setCurrentIndex(1)
@@ -791,7 +770,7 @@ class VulnCamWindow(QMainWindow):
                                        t['mosaic_waiting'], t['mosaic_working'])
             self._mosaic_cells[key] = self._mosaic_grid.get_cell(ip, port)
             # Queue thumbnail only if no worker is running (avoid competing MPV processes)
-            if self._mosaic_radio.isChecked() and self._running_source is None:
+            if self._running_source is None:
                 self._queue_thumbnail(ip, port)
         elif key and key in self._mosaic_cells:
             regenerating = self._running_source in ('shodan', 'scan_all', 'scan_selected')
@@ -823,14 +802,10 @@ class VulnCamWindow(QMainWindow):
             self._apply_filter()
         cell = self._mosaic_cells.get((ip, port))
         if cell and not cell.has_thumbnail():
-            mosaic_run_active = (self._mosaic_radio.isChecked()
-                                 and self._running_source is not None)
-            if status == 'failed' and self._mosaic_radio.isChecked() \
-                    and not mosaic_run_active:
+            if status == 'failed' and self._running_source is None:
                 # Worker reported failure → retry via ThumbnailManager
                 self._retry_or_fail_thumbnail(ip, port, cell)
-            elif status == 'working' and self._mosaic_radio.isChecked() \
-                    and self._running_source is None:
+            elif status == 'working' and self._running_source is None:
                 # Stream confirmed working with no active run (e.g. double-click) →
                 # now safe to capture thumbnail (no competing MPV window process)
                 cell.set_status(status)
@@ -869,6 +844,9 @@ class VulnCamWindow(QMainWindow):
         if not data:
             return
         ip, port, title = data
+        if self._stream_status((ip, port)) != 'working':
+            self._append_log(self._t('log_not_verified').format(title))
+            return
         mpv_path = self.mpv_path.text().strip()
         if not mpv_path:
             QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
@@ -1043,8 +1021,7 @@ class VulnCamWindow(QMainWindow):
         if errors:
             QMessageBox.warning(self, self._t('dlg_load_err_title'),
                                 self._t('dlg_load_err').format('\n'.join(errors)))
-        if self._mosaic_radio.isChecked():
-            self._sync_mosaic_cells()
+        self._sync_mosaic_cells()
         for key, audio in audio_map.items():
             cell = self._mosaic_cells.get(key)
             if cell:
@@ -1077,9 +1054,7 @@ class VulnCamWindow(QMainWindow):
             max_processes = self.max_proc_spin.value(),
             max_windows   = 9999,
             stream_record = self.record_check.isChecked(),
-            check_only    = self._check_only_check.isChecked() and self._list_radio.isChecked(),
-            probe_seconds = self._probe_spin.value(),
-            generate_mosaic = False,
+            probe           = False,
             thumb_timeout   = self._thumb_timeout_spin.value(),
             verbose         = False,
         )
@@ -1092,16 +1067,24 @@ class VulnCamWindow(QMainWindow):
         if mpv:
             self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
 
+    def _stream_status(self, key):
+        """Single source of truth for a stream's probe status ('working'/'failed'/... or
+        None if it doesn't have a mosaic cell yet)."""
+        cell = self._mosaic_cells.get(key)
+        return cell.status() if cell else None
+
     def _connect_all(self):
         visible = self._visible_items()
-        if not visible:
+        matches = [key for key, _ in visible if self._stream_status(key) == 'working']
+        if not matches:
+            self._append_log(self._t('log_no_working_selected'))
             return
         config = self._prepare_run()
         if config is None:
             return
-        for _, item in visible:
-            item.setForeground(COLOR_LAUNCHING)
-        matches = [key for key, _ in visible]
+        for key, item in visible:
+            if key in matches:
+                item.setForeground(COLOR_LAUNCHING)
         args = self._make_args()
         self._running_source = 'connect_all'
         self.log_view.clear()
@@ -1138,7 +1121,6 @@ class VulnCamWindow(QMainWindow):
         self._list_radio.setEnabled(not running)
         self._mosaic_radio.setEnabled(not running)
         self.record_check.setEnabled(not running)
-        self._check_only_check.setEnabled(not running and self._list_radio.isChecked())
 
     def eventFilter(self, obj, event):
         if (event.type() == QEvent.Type.KeyPress
@@ -1167,7 +1149,8 @@ class VulnCamWindow(QMainWindow):
             self._scan_selected()
 
     def _scan_all(self):
-        """Generate thumbnails for all visible streams in mosaic mode."""
+        """Probe all visible streams and capture a thumbnail for each (retries failed
+        ones too — this is the only way to (re)test a stream, regardless of view)."""
         visible = self._visible_items()
         if not visible:
             return
@@ -1177,15 +1160,26 @@ class VulnCamWindow(QMainWindow):
         for _, item in visible:
             item.setForeground(COLOR_LAUNCHING)
         matches = [key for key, _ in visible]
-        args = self._make_args(leave_windows=False, stream_record=False,
-                               check_only=False, generate_mosaic=True)
+        args = self._make_args(leave_windows=False, stream_record=False, probe=True)
         self._running_source = 'scan_all'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
 
+    def _selected_keys(self):
+        """Currently-selected stream keys, from whichever view (list or mosaic) is active."""
+        if self._mosaic_radio.isChecked():
+            return self._mosaic_grid.selected_keys()
+        keys = []
+        for item in self._streams_list.selectedItems():
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if data:
+                keys.append((data[0], data[1]))
+        return keys
+
     def _scan_selected(self):
-        """Generate thumbnails for selected streams in mosaic mode."""
-        selected_keys = self._mosaic_grid.selected_keys()
+        """Probe the selected streams and capture a thumbnail for each — the way to
+        retry a 'failed' stream, regardless of view."""
+        selected_keys = self._selected_keys()
         if not selected_keys:
             return
         config = self._prepare_run()
@@ -1199,8 +1193,7 @@ class VulnCamWindow(QMainWindow):
                 matches.append((ip, port))
         if not matches:
             return
-        args = self._make_args(leave_windows=False, stream_record=False,
-                               check_only=False, generate_mosaic=True)
+        args = self._make_args(leave_windows=False, stream_record=False, probe=True)
         self._running_source = 'scan_selected'
         self.log_view.clear()
         self._start_worker(config, args, matches=matches)
@@ -1218,34 +1211,18 @@ class VulnCamWindow(QMainWindow):
             self._connect_selected()
 
     def _connect_selected(self):
-        # Get selection from the active view (list or mosaic)
-        if self._mosaic_radio.isChecked():
-            selected_keys = self._mosaic_grid.selected_keys()
-            if not selected_keys:
-                return
-        else:
-            selected_items = self._streams_list.selectedItems()
-            if not selected_items:
-                return
-            selected_keys = []
-            for item in selected_items:
-                data = item.data(Qt.ItemDataRole.UserRole)
-                if data:
-                    selected_keys.append((data[0], data[1]))
-        if not selected_keys:
+        selected_keys = self._selected_keys()
+        matches = [key for key in selected_keys if self._stream_status(key) == 'working']
+        if not matches:
+            self._append_log(self._t('log_no_working_selected'))
             return
         config = self._prepare_run()
         if config is None:
             return
-        matches = []
-        for ip, port in selected_keys:
+        for ip, port in matches:
             item = self._stream_items.get((ip, port))
             if item:
-                ip_d, port_d, _ = item.data(Qt.ItemDataRole.UserRole)
-                matches.append((ip_d, port_d))
                 item.setForeground(COLOR_LAUNCHING)
-        if not matches:
-            return
         self._apply_filter()
         args = self._make_args()
         self._running_source = 'connect_selected'
@@ -1316,13 +1293,7 @@ class VulnCamWindow(QMainWindow):
         mosaic = self._mosaic_radio.isChecked()
         self._streams_list.setVisible(not mosaic)
         self._mosaic_grid.setVisible(mosaic)
-        self._scan_btn.setVisible(mosaic)
-        self._scan_selected_btn.setVisible(mosaic)
         self._thumb_size_combo.setVisible(mosaic)
-        # Check Only is incompatible with mosaic (thumbnail capture acts as the check)
-        self._check_only_check.setEnabled(not mosaic)
-        self._probe_spin.setEnabled(not mosaic and self._check_only_check.isChecked())
-        self._label_probe.setEnabled(not mosaic and self._check_only_check.isChecked())
         if mosaic:
             self._sync_mosaic_cells()
 
@@ -1380,7 +1351,7 @@ class VulnCamWindow(QMainWindow):
         max_procs_ref = [args.max_processes]
         self._proc_conn = self.max_proc_spin.valueChanged.connect(
             lambda v: max_procs_ref.__setitem__(0, v))
-        thumb_dir = self._temp_dir if getattr(args, 'generate_mosaic', False) else None
+        thumb_dir = self._temp_dir if getattr(args, 'probe', False) else None
         w = VulnCamWorker(config, args, matches=matches, skip_fn=skip_fn,
                           max_procs_ref=max_procs_ref, thumb_base_dir=thumb_dir)
         self.worker = w
@@ -1424,7 +1395,7 @@ class VulnCamWindow(QMainWindow):
             pages         = self.pages_spin.value(),
             random_pages  = self.random_check.isChecked(),
             total_results = self.allres_check.isChecked(),
-            generate_mosaic = self._mosaic_radio.isChecked(),
+            probe = True,
         )
         dedup = self._dedup_check.isChecked()
         items_ref = self._stream_items
