@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QPushButton, QSpinBox, QCheckBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QSizePolicy, QComboBox,
     QSplitter, QListWidget, QListWidgetItem,
-    QRadioButton, QButtonGroup,
+    QRadioButton, QButtonGroup, QFrame,
 )
 from PyQt6.QtCore import (QThreadPool, Qt, QTimer, QEvent, pyqtSlot)
 from PyQt6.QtGui import QFont, QTextCursor, QPixmap
@@ -151,6 +151,22 @@ class VulnCamWindow(QMainWindow):
 
         self._cfg_group = QGroupBox()
         cfg_layout = QVBoxLayout(self._cfg_group)
+
+        cfg_toggle_row = QHBoxLayout()
+        self._cfg_toggle_btn = QPushButton()
+        self._cfg_toggle_btn.setCheckable(True)
+        self._cfg_toggle_btn.setFlat(True)
+        self._cfg_toggle_btn.setStyleSheet('font-weight: 600; text-align: left;')
+        self._cfg_toggle_btn.toggled.connect(self._on_cfg_toggle)
+        cfg_toggle_row.addWidget(self._cfg_toggle_btn)
+        cfg_toggle_row.addStretch()
+        cfg_layout.addLayout(cfg_toggle_row)
+
+        self._cfg_body = QWidget()
+        self._cfg_body.setVisible(False)   # collapsed by default — set once, rarely touched
+        cfg_layout.addWidget(self._cfg_body)
+        cfg_layout = QVBoxLayout(self._cfg_body)
+        cfg_layout.setContentsMargins(0, 0, 0, 0)
 
         lang_row = QHBoxLayout()
         self._lang_label = QLabel()
@@ -410,27 +426,8 @@ class VulnCamWindow(QMainWindow):
         sg_layout.addLayout(view_row)
         self._view_btn_group.buttonToggled.connect(self._on_view_mode_changed)
 
-        # Row 1: data management actions
-        actions_row1 = QHBoxLayout()
-        self._discard_check = QCheckBox()
-        self._discard_check.setChecked(False)
-        actions_row1.addWidget(self._discard_check)
-        actions_row1.addStretch()
-        self._clear_btn = QPushButton()
-        self._clear_btn.clicked.connect(self._clear_streams)
-        self._clear_failed_btn = QPushButton()
-        self._clear_failed_btn.clicked.connect(self._clear_failed_streams)
-        self._save_streams_btn = QPushButton()
-        self._save_streams_btn.clicked.connect(self._save_streams)
-        self._load_streams_btn = QPushButton()
-        self._load_streams_btn.clicked.connect(self._load_streams)
-        for w in (self._clear_btn, self._clear_failed_btn,
-                  self._save_streams_btn, self._load_streams_btn):
-            actions_row1.addWidget(w)
-        sg_layout.addLayout(actions_row1)
-
-        # Row 2: connection actions
-        actions_row2 = QHBoxLayout()
+        # Single action bar: connect/scan (primary) | separator | manage streams | discard option
+        actions_row = QHBoxLayout()
         self._connect_btn = QPushButton()
         self._connect_btn.clicked.connect(self._on_connect_btn_clicked)
         self._connect_selected_btn = QPushButton()
@@ -441,9 +438,30 @@ class VulnCamWindow(QMainWindow):
         self._scan_selected_btn.clicked.connect(self._on_scan_selected_btn_clicked)
         for w in (self._connect_btn, self._connect_selected_btn,
                   self._scan_btn, self._scan_selected_btn):
-            actions_row2.addWidget(w)
-        actions_row2.addStretch()
-        sg_layout.addLayout(actions_row2)
+            actions_row.addWidget(w)
+
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.VLine)
+        sep1.setFrameShadow(QFrame.Shadow.Sunken)
+        actions_row.addWidget(sep1)
+
+        self._clear_btn = QPushButton()
+        self._clear_btn.clicked.connect(self._clear_streams)
+        self._clear_failed_btn = QPushButton()
+        self._clear_failed_btn.clicked.connect(self._clear_failed_streams)
+        self._save_streams_btn = QPushButton()
+        self._save_streams_btn.clicked.connect(self._save_streams)
+        self._load_streams_btn = QPushButton()
+        self._load_streams_btn.clicked.connect(self._load_streams)
+        for w in (self._clear_btn, self._clear_failed_btn,
+                  self._save_streams_btn, self._load_streams_btn):
+            actions_row.addWidget(w)
+
+        actions_row.addStretch()
+        self._discard_check = QCheckBox()
+        self._discard_check.setChecked(False)
+        actions_row.addWidget(self._discard_check)
+        sg_layout.addLayout(actions_row)
 
         self._streams_list = QListWidget()
         self._streams_list.setFont(QFont('Monospace', 8))
@@ -477,7 +495,8 @@ class VulnCamWindow(QMainWindow):
         t = TRANSLATIONS[self._lang]
         self.setWindowTitle(t['window_title'])
         self._lang_label.setText(t['label_language'])
-        self._cfg_group.setTitle(t['group_config'])
+        arrow = '▾' if self._cfg_body.isVisible() else '▸'
+        self._cfg_toggle_btn.setText(f'{arrow} {t["group_config"]}')
         self._label_config_file.setText(t['label_config_file'])
         self._browse_cfg_btn.setText(t['btn_browse'])
         self._save_cfg_btn.setText(t['btn_save_cfg'])
@@ -558,6 +577,12 @@ class VulnCamWindow(QMainWindow):
         t = TRANSLATIONS[self._lang]
         arrow = '▾' if checked else '▸'
         self._fb_toggle_btn.setText(f'{arrow} {t["btn_adv_filters"]}')
+
+    def _on_cfg_toggle(self, checked):
+        self._cfg_body.setVisible(checked)
+        t = TRANSLATIONS[self._lang]
+        arrow = '▾' if checked else '▸'
+        self._cfg_toggle_btn.setText(f'{arrow} {t["group_config"]}')
 
     def _build_extend_from_filters(self, _=None):
         parts = []
