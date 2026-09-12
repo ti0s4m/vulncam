@@ -2490,6 +2490,10 @@ class VulnCamWindow(QMainWindow):
                 pass
             if self.worker is w:
                 self.worker = None
+            # w.finished (custom signal, emitted at the end of run()) can fire a
+            # hair before the underlying OS thread has actually unwound; wait()
+            # blocks until it truly has, avoiding "destroyed while still running".
+            w.wait(5000)
             w.deleteLater()
 
         w.log_message.connect(self._append_log)
