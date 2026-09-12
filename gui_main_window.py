@@ -472,6 +472,7 @@ class VulnCamWindow(QMainWindow):
         self._streams_list.installEventFilter(self)
         self._streams_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._streams_list.customContextMenuRequested.connect(self._on_list_context_menu)
+        self._streams_list.itemSelectionChanged.connect(self._refresh_connect_buttons)
         sg_layout.addWidget(self._streams_list)
 
         self._mosaic_grid = MosaicGrid()
@@ -479,6 +480,7 @@ class VulnCamWindow(QMainWindow):
             self._on_mosaic_cell_double_clicked)
         self._mosaic_grid.cell_context_menu_requested.connect(
             self._on_mosaic_context_menu)
+        self._mosaic_grid.selection_changed.connect(self._refresh_connect_buttons)
         self._mosaic_grid.setVisible(False)
         self._mosaic_grid.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._mosaic_grid.installEventFilter(self)
@@ -837,19 +839,23 @@ class VulnCamWindow(QMainWindow):
             item.setForeground(COLOR_WORKING if status == 'working' else COLOR_FAILED)
             self._apply_filter()
         cell = self._mosaic_cells.get((ip, port))
-        if cell and not cell.has_thumbnail():
-            if status == 'failed' and self._running_source is None:
-                # Worker reported failure → retry via ThumbnailManager
-                self._retry_or_fail_thumbnail(ip, port, cell)
-            elif status == 'working' and self._running_source is None:
-                # Stream confirmed working with no active run (e.g. double-click) →
-                # now safe to capture thumbnail (no competing MPV window process)
-                cell.set_status(status)
-                self._queue_thumbnail(ip, port)
-            else:
-                cell.set_status(status)
+        if cell:
+            # Status always reflects the latest outcome, even if a thumbnail from an
+            # earlier successful probe is still shown (e.g. a live-connect attempt
+            # made after the probe can still fail and must flip the cell back to
+            # 'failed' — otherwise it stays gate-open for future connect attempts).
+            cell.set_status(status)
+            if not cell.has_thumbnail():
+                if status == 'failed' and self._running_source is None:
+                    # Worker reported failure → retry via ThumbnailManager
+                    self._retry_or_fail_thumbnail(ip, port, cell)
+                elif status == 'working' and self._running_source is None:
+                    # Stream confirmed working with no active run (e.g. double-click) →
+                    # now safe to capture thumbnail (no competing MPV window process)
+                    self._queue_thumbnail(ip, port)
         if status == 'working':
             self._launch_audio_probe(ip, port)
+        self._refresh_connect_buttons()
 
     def _launch_audio_probe(self, ip, port):
         key = (ip, port)
@@ -1058,6 +1064,7 @@ class VulnCamWindow(QMainWindow):
                 ip, port, _ = data
                 self._mosaic_grid.set_cell_visible(ip, port, not hidden)
         self._update_count()
+        self._refresh_connect_buttons()
 
     def _visible_items(self):
         """Returns list of (key, item) for currently visible stream items."""
@@ -1195,6 +1202,18 @@ class VulnCamWindow(QMainWindow):
         None if it doesn't have a mosaic cell yet)."""
         cell = self._mosaic_cells.get(key)
         return cell.status() if cell else None
+
+    def _refresh_connect_buttons(self):
+        """Keep Connect all/selected enabled exactly when the context menu's Connect
+        would be: at least one target ('visible' / 'selected') is already 'working'.
+        Never runs while a worker is active — _set_running owns button state then."""
+        if self._running_source is not None:
+            return
+        visible_keys = [k for k, _ in self._visible_items()]
+        self._connect_btn.setEnabled(
+            any(self._stream_status(k) == 'working' for k in visible_keys))
+        self._connect_selected_btn.setEnabled(
+            any(self._stream_status(k) == 'working' for k in self._selected_keys()))
 
     def _connect_all(self):
         visible = self._visible_items()
@@ -1425,6 +1444,7 @@ class VulnCamWindow(QMainWindow):
         self._thumb_size_combo.setVisible(mosaic)
         if mosaic:
             self._sync_mosaic_cells()
+        self._refresh_connect_buttons()
 
     def _on_thumb_size_changed(self, _index):
         w, h = self._thumb_size_combo.currentData()
