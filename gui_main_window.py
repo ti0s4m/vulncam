@@ -878,9 +878,12 @@ class VulnCamWindow(QMainWindow):
         start = time.time()
 
         def _finish(status):
-            self._reconnect_pids.discard(pid)
             if status == 'working':
+                # Keep counting the pid in Proc (like the batch path does) until
+                # _poll_live_mpv notices the process has actually exited.
                 self._add_live_mpv_pid(pid)
+            else:
+                self._reconnect_pids.discard(pid)
             self._refresh_stats_label()
             self._on_stream_status(title, status)
 
@@ -1262,20 +1265,26 @@ class VulnCamWindow(QMainWindow):
                 self._mosaic_cells[(ip, port)] = cell
                 self._mosaic_grid.set_cell_visible(ip, port, not item.isHidden())
 
+    @staticmethod
+    def _pid_alive(pid):
+        try:
+            return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            return False
+
     def _poll_live_mpv(self):
-        """Remove PIDs of closed MPV windows and refresh the counter."""
-        dead = set()
-        for pid in self._live_mpv_pids:
-            try:
-                p = psutil.Process(pid)
-                if p.status() == psutil.STATUS_ZOMBIE:
-                    dead.add(pid)
-            except psutil.NoSuchProcess:
-                dead.add(pid)
-        if dead:
-            self._live_mpv_pids -= dead
+        """Remove PIDs of closed MPV windows/processes and refresh the counter.
+        A double-click connection stays in both _live_mpv_pids (Win) and
+        _reconnect_pids (Proc) once confirmed working, so both are pruned here
+        together — matching how the batch worker only drops a process from Proc
+        once it actually exits, not once its window is merely confirmed."""
+        dead_live = {pid for pid in self._live_mpv_pids if not self._pid_alive(pid)}
+        dead_reconnect = {pid for pid in self._reconnect_pids if not self._pid_alive(pid)}
+        if dead_live or dead_reconnect:
+            self._live_mpv_pids -= dead_live
+            self._reconnect_pids -= dead_reconnect
             self._refresh_stats_label()
-        if not self._live_mpv_pids:
+        if not self._live_mpv_pids and not self._reconnect_pids:
             self._live_mpv_timer.stop()
 
     def _add_live_mpv_pid(self, pid):
