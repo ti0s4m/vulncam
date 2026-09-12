@@ -5,3 +5,4 @@ ti0s4m.ini
 config.ini
 test_vulncam.py
 __pycache__/*
+recordings/
