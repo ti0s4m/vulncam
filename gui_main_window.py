@@ -1178,9 +1178,12 @@ class VulnCamWindow(QMainWindow):
             self._start_live_embed(key, self._target_title(key))
 
     def _start_headless_recording(self, key, title):
-        """Record a stream to disk without opening any window (mpv --vo=null
-        --force-window=no) — a separate mpv process from live playback, so it can
-        be stopped independently without affecting a viewer watching the stream."""
+        """Record a stream to disk without opening any window or making any sound
+        (mpv --vo=null --force-window=no --ao=null) — a separate mpv process from
+        live playback, so it can be stopped independently without affecting a
+        viewer watching the stream. --stream-record copies the incoming stream
+        as-is, so disabling audio output doesn't drop audio from the recording,
+        same as --vo=null doesn't drop video from it."""
         if key in self._stream_sessions:
             self._append_log(self._t('log_already_playing').format(title))
             return
@@ -1192,7 +1195,7 @@ class VulnCamWindow(QMainWindow):
             return
         record_path = self._new_recording_path(key)
         url = build_rtsp_url(ip, port, *self._credentials.get(key, (None, None)))
-        cmd = [mpv_path, '--vo=null', '--force-window=no',
+        cmd = [mpv_path, '--vo=null', '--force-window=no', '--ao=null',
                '--really-quiet', '--no-terminal',
                f'--stream-record={record_path}', url]
         try:
