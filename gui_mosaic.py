@@ -127,6 +127,14 @@ class MosaicCell(QFrame):
             else:
                 self._img_lbl.setPixmap(
                     self._make_placeholder(self._no_signal_text, COLOR_FAILED))
+        if self._live_mode:
+            # A live cell has a real native child window inside _img_lbl (see
+            # live_video_widget()); setStyleSheet() below forces Qt to resync that
+            # native window's clipping/stacking on every call, which is cheap for an
+            # ordinary (alien) widget but expensive enough under X11 that toggling
+            # selection on several live cells in a row can make the whole app feel
+            # frozen. Skip it while live — set_live_mode() re-syncs once on exit.
+            return
         c = {'waiting': '#404040', 'launching': COLOR_LAUNCHING.name(),
              'working': COLOR_WORKING.name(), 'failed': COLOR_FAILED.name()}
         col = c.get(self._status, COLOR_LAUNCHING.name())
@@ -287,6 +295,8 @@ class MosaicCell(QFrame):
             self._live_widget.raise_()
             self._audio_badge.raise_()
             self._session_badge.raise_()
+        else:
+            self._refresh()   # _refresh() skips border/bg styling while live; catch up now
 
     def is_live_mode(self):
         return self._live_mode

@@ -32,7 +32,7 @@ from vulncam import (
 from gui_i18n import TRANSLATIONS
 from gui_constants import (
     COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, COLOR_SAVED,
-    THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR,
+    THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR, MAX_LIVE_EMBEDS,
 )
 from gui_mosaic import MosaicGrid
 from gui_thumbnails import ThumbnailManager, AudioProbeTask, AuthProbeTask, build_rtsp_url
@@ -1016,6 +1016,7 @@ class VulnCamWindow(QMainWindow):
                   if k in self._stream_sessions and not self._stream_sessions[k]['headless']]
         recording = [k for k in targets
                     if k in self._stream_sessions and self._stream_sessions[k]['headless']]
+        live_keys = [k for k, s in self._stream_sessions.items() if s.get('embedded')]
 
         menu = QMenu(self)
         act_connect = menu.addAction(self._t('ctx_connect'))
@@ -1023,9 +1024,12 @@ class VulnCamWindow(QMainWindow):
         act_record = menu.addAction(self._t('ctx_connect_record'))
         act_record.setEnabled(bool(connectable))
         act_live_view = menu.addAction(self._t('ctx_live_view'))
-        act_live_view.setEnabled(self._mosaic_radio.isChecked() and bool(connectable))
+        act_live_view.setEnabled(self._mosaic_radio.isChecked() and bool(connectable)
+                                 and len(live_keys) < MAX_LIVE_EMBEDS)
         act_stop_playback = menu.addAction(self._t('ctx_stop_playback'))
         act_stop_playback.setEnabled(bool(playing))
+        act_stop_all_live = menu.addAction(self._t('ctx_stop_all_live'))
+        act_stop_all_live.setEnabled(bool(live_keys))
         menu.addSeparator()
         act_start_headless = menu.addAction(self._t('ctx_start_headless_record'))
         act_start_headless.setEnabled(bool(connectable))
@@ -1079,6 +1083,8 @@ class VulnCamWindow(QMainWindow):
             self._start_live_targets(connectable)
         elif chosen is act_stop_playback:
             self._stop_targets(playing)
+        elif chosen is act_stop_all_live:
+            self._stop_all_live_views()
         elif chosen is act_start_headless:
             self._start_headless_targets(connectable)
         elif chosen is act_stop_record:
@@ -1200,6 +1206,10 @@ class VulnCamWindow(QMainWindow):
         if key in self._stream_sessions:
             self._append_log(self._t('log_already_playing').format(title))
             return
+        active_live = sum(1 for s in self._stream_sessions.values() if s.get('embedded'))
+        if active_live >= MAX_LIVE_EMBEDS:
+            self._append_log(self._t('log_live_limit').format(MAX_LIVE_EMBEDS))
+            return
         ip, port = key
         mpv_path = self.mpv_path.text().strip()
         if not mpv_path:
@@ -1217,12 +1227,14 @@ class VulnCamWindow(QMainWindow):
         # by mpv (needed for selecting/right-clicking a cell while it's live);
         # --input-vo-keyboard=no/--no-input-default-bindings do the same for the
         # keyboard, since this is meant to be a passive preview tile, not a player.
-        cmd = [mpv_path, f'--wid={wid}', url, '--mute=yes',
+        # --vo=x11 (plain X11 blits, no GPU context) instead of the default GPU-
+        # accelerated output: each embedded tile would otherwise open its own EGL
+        # context, and several of those at once appear to contend for the GPU/
+        # compositor badly enough to make the whole desktop feel unresponsive.
+        cmd = [mpv_path, f'--wid={wid}', url, '--mute=yes', '--vo=x11',
                '--no-osc', '--osd-level=0', '--cursor-autohide=always',
                '--force-window=immediate', '--input-cursor=no',
                '--input-vo-keyboard=no', '--no-input-default-bindings']
-        if sys.platform == 'linux':
-            cmd.append('--gpu-context=x11egl')
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.STDOUT)
@@ -1235,6 +1247,13 @@ class VulnCamWindow(QMainWindow):
         self._append_log(self._t('log_live_started').format(title))
 
     def _stop_targets(self, keys):
+        for key in keys:
+            self._stop_session(key, self._target_title(key))
+
+    def _stop_all_live_views(self):
+        """Stop every embedded live view app-wide, regardless of selection —
+        the escape hatch for when too many at once make the whole app sluggish."""
+        keys = [k for k, s in self._stream_sessions.items() if s.get('embedded')]
         for key in keys:
             self._stop_session(key, self._target_title(key))
 

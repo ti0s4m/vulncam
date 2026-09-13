@@ -123,6 +123,8 @@ TRANSLATIONS = {
         'log_credentials_failed': 'Connection failed with the given credentials: {}',
         'ctx_live_view':    'View live',
         'log_live_started': 'Live view started: {}',
+        'ctx_stop_all_live': 'Stop all live views',
+        'log_live_limit':    'Live view limit reached ({} max) — stop one before starting another',
     },
     'es': {
         'window_title':       'VulnCam',
@@ -246,5 +248,7 @@ TRANSLATIONS = {
         'log_credentials_failed': 'Conexión fallida con las credenciales indicadas: {}',
         'ctx_live_view':    'Ver en directo',
         'log_live_started': 'Vista en directo iniciada: {}',
+        'ctx_stop_all_live': 'Detener todos los directos',
+        'log_live_limit':    'Límite de vistas en directo alcanzado ({} máx.) — detén una antes de iniciar otra',
     },
 }
