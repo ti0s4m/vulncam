@@ -278,8 +278,7 @@ class MosaicCell(QFrame):
         self._auth_failed = False
         self._audio_badge.setVisible(False)
         self._session_badge.setVisible(False)
-        self.set_live_mode(False)
-        self._refresh()
+        self.set_live_mode(False)   # already calls _refresh() with the state set above
 
     def audio_type(self):
         """Return the stored audio type ('V', 'AV') or None if not probed yet."""

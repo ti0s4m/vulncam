@@ -1025,7 +1025,7 @@ class VulnCamWindow(QMainWindow):
                   if k in self._stream_sessions and not self._stream_sessions[k]['headless']]
         recording = [k for k in targets
                     if k in self._stream_sessions and self._stream_sessions[k]['headless']]
-        live_keys = [k for k, s in self._stream_sessions.items() if s.get('embedded')]
+        live_keys = self._live_embed_keys()
 
         menu = QMenu(self)
         act_connect = menu.addAction(self._t('ctx_connect'))
@@ -1219,8 +1219,7 @@ class VulnCamWindow(QMainWindow):
             self._append_log(self._t('log_already_playing').format(title))
             return
         max_live = self.max_live_spin.value()
-        active_live = sum(1 for s in self._stream_sessions.values() if s.get('embedded'))
-        if active_live >= max_live:
+        if len(self._live_embed_keys()) >= max_live:
             self._append_log(self._t('log_live_limit').format(max_live))
             return
         ip, port = key
@@ -1240,14 +1239,19 @@ class VulnCamWindow(QMainWindow):
         # by mpv (needed for selecting/right-clicking a cell while it's live);
         # --input-vo-keyboard=no/--no-input-default-bindings do the same for the
         # keyboard, since this is meant to be a passive preview tile, not a player.
-        # --vo=x11 (plain X11 blits, no GPU context) instead of the default GPU-
-        # accelerated output: each embedded tile would otherwise open its own EGL
-        # context, and several of those at once appear to contend for the GPU/
-        # compositor badly enough to make the whole desktop feel unresponsive.
-        cmd = [mpv_path, f'--wid={wid}', url, '--mute=yes', '--vo=x11',
+        cmd = [mpv_path, f'--wid={wid}', url, '--mute=yes',
                '--no-osc', '--osd-level=0', '--cursor-autohide=always',
                '--force-window=immediate', '--input-cursor=no',
                '--input-vo-keyboard=no', '--no-input-default-bindings']
+        if sys.platform == 'linux':
+            # Plain X11 blits, no GPU context: each embedded tile would otherwise
+            # open its own EGL context, and several of those at once appear to
+            # contend for the GPU/compositor badly enough to make the whole
+            # desktop feel unresponsive. --vo=x11 doesn't exist on Windows/macOS,
+            # so this is deliberately Linux-only; other platforms use mpv's default
+            # (--vo=gpu with an auto-picked context), which isn't known to have
+            # the same contention issue there.
+            cmd.append('--vo=x11')
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.STDOUT)
@@ -1266,8 +1270,7 @@ class VulnCamWindow(QMainWindow):
     def _stop_all_live_views(self):
         """Stop every embedded live view app-wide, regardless of selection —
         the escape hatch for when too many at once make the whole app sluggish."""
-        keys = [k for k, s in self._stream_sessions.items() if s.get('embedded')]
-        for key in keys:
+        for key in self._live_embed_keys():
             self._stop_session(key, self._target_title(key))
 
     def _copy_rtsp_links(self, keys):
@@ -1523,6 +1526,10 @@ class VulnCamWindow(QMainWindow):
         """Whether a NEW connection may be started for this stream: verified working,
         and not already playing/recording (that's what "Stop playback" is for)."""
         return self._stream_status(key) == 'working' and key not in self._stream_sessions
+
+    def _live_embed_keys(self):
+        """Keys with an active embedded live view, app-wide."""
+        return [k for k, s in self._stream_sessions.items() if s.get('embedded')]
 
     def _refresh_connect_buttons(self):
         """Keep Connect all/selected enabled exactly when the context menu's Connect
