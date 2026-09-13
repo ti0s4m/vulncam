@@ -12,7 +12,7 @@ import shodan
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from vulncam import VulnCam, REQUIRED_SECTION, DEFAULT_TIMEOUT, RESULTS_PER_PAGE, MAX_PAGES
-from gui_thumbnails import build_capture_cmd, capture_env, find_thumbnail_file
+from gui_thumbnails import build_capture_cmd, build_rtsp_url, capture_env, find_thumbnail_file
 from gui_constants import RECORDINGS_DIR
 
 _vulncam_logger = logging.getLogger('vulncam')
@@ -29,6 +29,7 @@ class GUIVulnCam(VulnCam):
         self.shodan_plan       = getattr(args, 'shodan_plan', '')
         self._log_dev_plan_limit = getattr(args, 'log_dev_plan_limit', '')
         self.thumb_base_dir    = None    # set by worker before run()
+        self.credentials       = {}      # (ip, port) -> (username, password); set by worker
         self.on_stream_added       = None
         self.on_stream_status      = None
         self.on_window_opened      = None   # (pid, ip, port, record_path) → live MPV window appeared
@@ -243,13 +244,14 @@ class GUIVulnCam(VulnCam):
             _vulncam_logger.info(title)
             thumb_dir = None
             record_path = None
+            username, password = self.credentials.get(match, (None, None))
+            url = build_rtsp_url(match[0], match[1], username, password)
             if self.probe:
                 thumb_dir = os.path.join(
                     self.thumb_base_dir or '', f'{match[0]}_{match[1]}')
                 os.makedirs(thumb_dir, exist_ok=True)
                 thumb_file_path = os.path.join(thumb_dir, 'thumb.png')
-                cmd = build_capture_cmd(mpv_path, match[0], match[1],
-                                        thumb_file_path, self.thumb_timeout)
+                cmd = build_capture_cmd(mpv_path, url, thumb_file_path, self.thumb_timeout)
             elif self.stream_record:
                 # Absolute path: must match what VulnCamWindow._recording_folder()
                 # computes (also absolute), since the GUI later opens these files
@@ -261,10 +263,9 @@ class GUIVulnCam(VulnCam):
                 record_path = os.path.join(folder, f'{ts}.mkv')
                 cmd = [mpv_path, f'--title={title}',
                        f'--stream-record={record_path}',
-                       'rtsp://%s:%d' % match, '--mute=yes']
+                       url, '--mute=yes']
             else:
-                cmd = [mpv_path, f'--title={title}',
-                       'rtsp://%s:%d' % match, '--mute=yes']
+                cmd = [mpv_path, f'--title={title}', url, '--mute=yes']
             if not self.probe and sys.platform == 'linux':
                 cmd.append('--gpu-context=x11egl')
             popen_env = capture_env() if self.probe else None
@@ -319,7 +320,7 @@ class VulnCamWorker(QThread):
     window_opened       = pyqtSignal(int, str, int, str)   # pid, ip, port, record_path ('' = none)
 
     def __init__(self, config, args, matches=None, skip_fn=None,
-                 max_procs_ref=None, thumb_base_dir=None):
+                 max_procs_ref=None, thumb_base_dir=None, credentials=None):
         super().__init__()
         self.config         = config
         self.args           = args
@@ -327,6 +328,7 @@ class VulnCamWorker(QThread):
         self.skip_fn        = skip_fn
         self.max_procs_ref  = max_procs_ref
         self.thumb_base_dir = thumb_base_dir
+        self.credentials    = credentials
         self.vulncam = None
         self._handler = None
 
@@ -345,6 +347,7 @@ class VulnCamWorker(QThread):
             self.vulncam.on_window_opened       = self.window_opened.emit
             self.vulncam.on_thumbnail_generated = self.thumbnail_generated.emit
             self.vulncam.thumb_base_dir         = self.thumb_base_dir
+            self.vulncam.credentials            = self.credentials or {}
             if self.max_procs_ref:
                 self.vulncam.get_max_processes = lambda: self.max_procs_ref[0]
             if self.matches is not None:

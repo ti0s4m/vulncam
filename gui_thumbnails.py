@@ -3,15 +3,27 @@ import os
 import socket
 import subprocess
 import sys
+from urllib.parse import quote
 
 from PyQt6.QtCore import QThread, QRunnable, QObject, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QPixmap
 
+
+def build_rtsp_url(ip, port, username=None, password=None):
+    """rtsp://ip:port, or rtsp://user:pass@ip:port when credentials are known.
+    Percent-encodes user/pass so special characters (':', '@', '/', ...) can't
+    break the URL."""
+    if username or password:
+        return (f'rtsp://{quote(username or "", safe="")}:'
+                f'{quote(password or "", safe="")}@{ip}:{port}')
+    return f'rtsp://{ip}:{port}'
+
+
 # ── Thumbnail generation ───────────────────────────────────────────────────────
 
-def build_capture_cmd(mpv_path, ip, port, thumb_file, timeout):
+def build_capture_cmd(mpv_path, url, thumb_file, timeout):
     """mpv command that decodes and saves a single video frame to thumb_file."""
-    return [mpv_path, f'rtsp://{ip}:{port}',
+    return [mpv_path, url,
             f'-o={thumb_file}', '--ovc=png', '--frames=1',
             '--really-quiet', '--no-terminal', f'--end={timeout}']
 
@@ -37,13 +49,16 @@ def find_thumbnail_file(thumb_dir):
 class ThumbnailWorker(QThread):
     done = pyqtSignal(str, int, str)   # ip, port, thumb_file_path ('' = failed)
 
-    def __init__(self, ip, port, mpv_path, thumb_dir, timeout):
+    def __init__(self, ip, port, mpv_path, thumb_dir, timeout,
+                 username=None, password=None):
         super().__init__()
         self._ip = ip
         self._port = port
         self._mpv_path = mpv_path
         self._thumb_dir = thumb_dir
         self._timeout = timeout
+        self._username = username
+        self._password = password
         self._proc = None
 
     def abort(self):
@@ -57,8 +72,8 @@ class ThumbnailWorker(QThread):
     def run(self):
         os.makedirs(self._thumb_dir, exist_ok=True)
         thumb = os.path.join(self._thumb_dir, 'thumb.png')
-        cmd = build_capture_cmd(self._mpv_path, self._ip, self._port,
-                                thumb, self._timeout)
+        url = build_rtsp_url(self._ip, self._port, self._username, self._password)
+        cmd = build_capture_cmd(self._mpv_path, url, thumb, self._timeout)
         try:
             self._proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                           stderr=subprocess.DEVNULL, env=capture_env())
@@ -86,23 +101,24 @@ class ThumbnailManager(QObject):
         super().__init__(parent)
         self._temp_dir = temp_dir
         self._get_max_workers = get_max_workers
-        self._queue = []    # [(ip, port, mpv_path, timeout)]
+        self._queue = []    # [(ip, port, mpv_path, timeout, username, password)]
         self._active = {}   # (ip, port) → ThumbnailWorker
 
-    def add(self, ip, port, mpv_path, timeout):
+    def add(self, ip, port, mpv_path, timeout, username=None, password=None):
         key = (ip, port)
         if key in self._active or any(q[0] == ip and q[1] == port
                                        for q in self._queue):
             return
-        self._queue.append((ip, port, mpv_path, timeout))
+        self._queue.append((ip, port, mpv_path, timeout, username, password))
         self._process_queue()
 
     def _process_queue(self):
         max_w = self._get_max_workers()
         while self._queue and len(self._active) < max_w:
-            ip, port, mpv_path, timeout = self._queue.pop(0)
+            ip, port, mpv_path, timeout, username, password = self._queue.pop(0)
             thumb_dir = os.path.join(self._temp_dir, f'{ip}_{port}')
-            w = ThumbnailWorker(ip, port, mpv_path, thumb_dir, timeout)
+            w = ThumbnailWorker(ip, port, mpv_path, thumb_dir, timeout,
+                               username=username, password=password)
             w.done.connect(self._worker_done)
             # Keep strong Python reference until after finished fires
             w.finished.connect(lambda worker=w: self._thumb_worker_finished(worker))
@@ -176,23 +192,26 @@ def _rtsp_describe(ip, port, timeout=3):
 
 
 def _probe_audio(ip, port, timeout=3):
-    """RTSP DESCRIBE to detect audio track. Returns 'AV', 'V', or None on failure."""
+    """RTSP DESCRIBE to detect audio track.
+    Returns (audio_type, raw_text): audio_type is 'AV'/'V'/None on failure."""
     _status, data = _rtsp_describe(ip, port, timeout)
     if not data:
-        return None
-    return 'AV' if b'm=audio' in data else 'V'
+        return None, ''
+    audio_type = 'AV' if b'm=audio' in data else 'V'
+    return audio_type, data.decode('utf-8', errors='replace')
 
 
 def probe_needs_auth(ip, port, timeout=3):
-    """True if the RTSP server answered with 401/403 (credentials required) —
-    distinct from a timeout/refused connection, which means it's just not there."""
-    status, _data = _rtsp_describe(ip, port, timeout)
-    return status in (401, 403)
+    """Returns (needs_auth, raw_text). needs_auth is True only for a 401/403
+    response (credentials required) — distinct from a timeout/refused
+    connection, which means it's just not there."""
+    status, data = _rtsp_describe(ip, port, timeout)
+    return status in (401, 403), data.decode('utf-8', errors='replace')
 
 
 class AudioProbeTask(QRunnable):
     class Signals(QObject):
-        done = pyqtSignal(str, int, str)   # ip, port, 'V'|'AV'
+        done = pyqtSignal(str, int, str, str)   # ip, port, 'V'|'AV', raw_text
 
     def __init__(self, ip, port):
         super().__init__()
@@ -202,13 +221,13 @@ class AudioProbeTask(QRunnable):
         self.setAutoDelete(True)
 
     def run(self):
-        result = _probe_audio(self._ip, self._port)
-        self.signals.done.emit(self._ip, self._port, result or 'V')
+        audio_type, raw_text = _probe_audio(self._ip, self._port)
+        self.signals.done.emit(self._ip, self._port, audio_type or 'V', raw_text)
 
 
 class AuthProbeTask(QRunnable):
     class Signals(QObject):
-        done = pyqtSignal(str, int, bool)   # ip, port, needs_auth
+        done = pyqtSignal(str, int, bool, str)   # ip, port, needs_auth, raw_text
 
     def __init__(self, ip, port):
         super().__init__()
@@ -218,6 +237,6 @@ class AuthProbeTask(QRunnable):
         self.setAutoDelete(True)
 
     def run(self):
-        result = probe_needs_auth(self._ip, self._port)
-        self.signals.done.emit(self._ip, self._port, result)
+        needs_auth, raw_text = probe_needs_auth(self._ip, self._port)
+        self.signals.done.emit(self._ip, self._port, needs_auth, raw_text)
 

@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QGroupBox, QLabel, QLineEdit, QPushButton, QSpinBox, QCheckBox,
     QPlainTextEdit, QFileDialog, QMessageBox, QSizePolicy, QComboBox,
     QSplitter, QListWidget, QListWidgetItem,
-    QRadioButton, QButtonGroup, QFrame, QMenu,
+    QRadioButton, QButtonGroup, QFrame, QMenu, QDialog, QDialogButtonBox,
 )
 from PyQt6.QtCore import (QThreadPool, Qt, QTimer, QEvent, QUrl, pyqtSlot)
 from PyQt6.QtGui import QFont, QTextCursor, QPixmap, QDesktopServices
@@ -35,7 +35,7 @@ from gui_constants import (
     THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR,
 )
 from gui_mosaic import MosaicGrid
-from gui_thumbnails import ThumbnailManager, AudioProbeTask, AuthProbeTask
+from gui_thumbnails import ThumbnailManager, AudioProbeTask, AuthProbeTask, build_rtsp_url
 from gui_worker import VulnCamWorker
 
 
@@ -101,6 +101,9 @@ class VulnCamWindow(QMainWindow):
         self._last_stats = (0, 0)
         self._reconnect_pids = set()
         self._stream_sessions = {}   # (ip, port) → {'pid', 'headless', 'record_path'}
+        self._credentials = {}       # (ip, port) → (username, password); memory-only
+        self._pending_credential_keys = set()   # awaiting confirmation from a connect attempt
+        self._rtsp_info = {}         # (ip, port) → last raw RTSP DESCRIBE response
         self._temp_dir = tempfile.mkdtemp(prefix='vulncam_thumbs_')
         self._thumb_manager = ThumbnailManager(
             self._temp_dir, lambda: self.max_proc_spin.value(), self)
@@ -834,6 +837,15 @@ class VulnCamWindow(QMainWindow):
         if ip is None:
             return
         key = (ip, port)
+        if key in self._pending_credential_keys:
+            self._pending_credential_keys.discard(key)
+            if status == 'failed':
+                # Credentials just tried didn't work — don't keep them "saved"
+                # while silently failing on every future connection attempt.
+                self._credentials.pop(key, None)
+                self._append_log(self._t('log_credentials_failed').format(title))
+            elif status == 'working':
+                self._append_log(self._t('log_credentials_saved').format(title))
         item = self._stream_items.get(key)
         if item:
             if status == 'failed' and self._discard_check.isChecked():
@@ -884,10 +896,11 @@ class VulnCamWindow(QMainWindow):
         self._auth_probes[key] = task.signals   # keep Signals alive until done
         QThreadPool.globalInstance().start(task)
 
-    @pyqtSlot(str, int, bool)
-    def _on_auth_probe_done(self, ip, port, needs_auth):
+    @pyqtSlot(str, int, bool, str)
+    def _on_auth_probe_done(self, ip, port, needs_auth, raw_text):
         key = (ip, port)
         self._auth_probes.pop(key, None)
+        self._rtsp_info[key] = raw_text
         cell = self._mosaic_cells.get(key)
         # Skip only if it's since been confirmed working — _retry_or_fail_thumbnail
         # briefly flips a thumbnail-less failure to 'launching' while it retries via
@@ -899,10 +912,11 @@ class VulnCamWindow(QMainWindow):
             if self._filter_combo.currentData() == 'auth':
                 self._apply_filter()
 
-    @pyqtSlot(str, int, str)
-    def _on_audio_probe_done(self, ip, port, result):
+    @pyqtSlot(str, int, str, str)
+    def _on_audio_probe_done(self, ip, port, result, raw_text):
         key = (ip, port)
         self._audio_probes.pop(key, None)
+        self._rtsp_info[key] = raw_text
         cell = self._mosaic_cells.get(key)
         if cell:
             cell.set_audio_type(result)
@@ -935,10 +949,11 @@ class VulnCamWindow(QMainWindow):
                                 self._t('dlg_mpv_no_path'))
             return
         record_path = self._new_recording_path(key) if force_record else None
+        url = build_rtsp_url(ip, port, *self._credentials.get(key, (None, None)))
         cmd = [mpv_path, f'--title={title}']
         if record_path:
             cmd.append(f'--stream-record={record_path}')
-        cmd += [f'rtsp://{ip}:{port}', '--mute=yes']
+        cmd += [url, '--mute=yes']
         if sys.platform == 'linux':
             cmd.append('--gpu-context=x11egl')
         try:
@@ -1016,6 +1031,15 @@ class VulnCamWindow(QMainWindow):
         act_copy = menu.addAction(self._t('ctx_copy_rtsp'))
         act_copy_host = menu.addAction(self._t('ctx_copy_host'))
 
+        # These two apply only to the single stream that was right-clicked, not the
+        # whole multi-selection — entering credentials and viewing info are per-stream.
+        menu.addSeparator()
+        cell = self._mosaic_cells.get(key)
+        act_credentials = menu.addAction(self._t('ctx_enter_credentials'))
+        act_credentials.setEnabled(bool(cell and cell.is_auth_failed()))
+        act_info = menu.addAction(self._t('ctx_info'))
+        act_info.setEnabled(key in self._rtsp_info)
+
         # Recordings submenu: about the single stream that was right-clicked, not
         # the whole multi-selection — opening/browsing recordings isn't a bulk action.
         recording_actions = {}
@@ -1059,6 +1083,61 @@ class VulnCamWindow(QMainWindow):
             self._copy_hosts(targets)
         elif chosen is act_delete:
             self._delete_targets(targets)
+        elif chosen is act_credentials:
+            self._on_enter_credentials(key, self._target_title(key))
+        elif chosen is act_info:
+            self._show_info_dialog(self._target_title(key), self._rtsp_info.get(key, ''))
+
+    def _prompt_credentials(self, title):
+        """Modal dialog asking for username/password. Returns (user, pass) or
+        None if the user cancels."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self._t('dlg_credentials_title'))
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel(title))
+        user_edit = QLineEdit()
+        pass_edit = QLineEdit()
+        pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        form = QVBoxLayout()
+        form.addWidget(QLabel(self._t('dlg_credentials_user')))
+        form.addWidget(user_edit)
+        form.addWidget(QLabel(self._t('dlg_credentials_pass')))
+        form.addWidget(pass_edit)
+        layout.addLayout(form)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
+                                   QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            return user_edit.text(), pass_edit.text()
+        return None
+
+    def _on_enter_credentials(self, key, title):
+        result = self._prompt_credentials(title)
+        if result is None:
+            return
+        self._credentials[key] = result
+        self._pending_credential_keys.add(key)
+        self._connect_stream(key, title)
+
+    def _show_info_dialog(self, title, text):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(self._t('dlg_info_title').format(title))
+        layout = QVBoxLayout(dlg)
+        view = QPlainTextEdit()
+        view.setReadOnly(True)
+        view.setFont(QFont('monospace'))
+        view.setPlainText(text)
+        layout.addWidget(view)
+        buttons = QDialogButtonBox()
+        copy_btn = buttons.addButton(self._t('btn_copy'), QDialogButtonBox.ButtonRole.ActionRole)
+        close_btn = buttons.addButton(self._t('btn_close'), QDialogButtonBox.ButtonRole.RejectRole)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(text))
+        close_btn.clicked.connect(dlg.reject)
+        layout.addWidget(buttons)
+        dlg.resize(600, 400)
+        dlg.exec()
 
     def _target_title(self, key):
         item = self._stream_items.get(key)
@@ -1087,9 +1166,10 @@ class VulnCamWindow(QMainWindow):
                                 self._t('dlg_mpv_no_path'))
             return
         record_path = self._new_recording_path(key)
+        url = build_rtsp_url(ip, port, *self._credentials.get(key, (None, None)))
         cmd = [mpv_path, '--vo=null', '--force-window=no',
                '--really-quiet', '--no-terminal',
-               f'--stream-record={record_path}', f'rtsp://{ip}:{port}']
+               f'--stream-record={record_path}', url]
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.STDOUT)
@@ -1334,7 +1414,9 @@ class VulnCamWindow(QMainWindow):
         """Queue a thumbnail capture for (ip, port) if an MPV path is set."""
         mpv = self.mpv_path.text().strip()
         if mpv:
-            self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value())
+            username, password = self._credentials.get((ip, port), (None, None))
+            self._thumb_manager.add(ip, port, mpv, self._thumb_timeout_spin.value(),
+                                     username=username, password=password)
 
     def _stream_status(self, key):
         """Single source of truth for a stream's probe status ('working'/'failed'/... or
@@ -1772,7 +1854,8 @@ class VulnCamWindow(QMainWindow):
             lambda v: max_procs_ref.__setitem__(0, v))
         thumb_dir = self._temp_dir if getattr(args, 'probe', False) else None
         w = VulnCamWorker(config, args, matches=matches, skip_fn=skip_fn,
-                          max_procs_ref=max_procs_ref, thumb_base_dir=thumb_dir)
+                          max_procs_ref=max_procs_ref, thumb_base_dir=thumb_dir,
+                          credentials=self._credentials)
         self.worker = w
         self._worker_refs.append(w)   # keep Python reference alive until finished
 
