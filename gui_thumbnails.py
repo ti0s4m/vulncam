@@ -133,10 +133,13 @@ class ThumbnailManager(QObject):
             w.wait(2000)       # generous: abort() kills MPV so thread exits fast
 
 
-# ── Audio detection via RTSP DESCRIBE ─────────────────────────────────────────
+# ── RTSP DESCRIBE probing: audio track detection, auth requirement ───────────
 
-def _probe_audio(ip, port, timeout=3):
-    """RTSP DESCRIBE to detect audio track. Returns 'AV', 'V', or None on failure."""
+def _rtsp_describe(ip, port, timeout=3):
+    """Send a raw RTSP DESCRIBE and return (status_code, body_bytes).
+    status_code is the numeric RTSP response code (e.g. 200, 401, 404) parsed
+    from the response's status line, or None if the request/response itself
+    failed (timeout, connection refused, malformed response, ...)."""
     try:
         with socket.create_connection((ip, port), timeout=timeout) as s:
             s.settimeout(timeout)
@@ -162,9 +165,29 @@ def _probe_audio(ip, port, timeout=3):
                             break
                 except socket.timeout:
                     break
-        return 'AV' if b'm=audio' in data else 'V'
     except Exception:
+        return None, b''
+    status = None
+    first_line = data.split(b'\r\n', 1)[0].decode('utf-8', errors='ignore')
+    parts = first_line.split()
+    if len(parts) >= 2 and parts[1].isdigit():
+        status = int(parts[1])
+    return status, data
+
+
+def _probe_audio(ip, port, timeout=3):
+    """RTSP DESCRIBE to detect audio track. Returns 'AV', 'V', or None on failure."""
+    _status, data = _rtsp_describe(ip, port, timeout)
+    if not data:
         return None
+    return 'AV' if b'm=audio' in data else 'V'
+
+
+def probe_needs_auth(ip, port, timeout=3):
+    """True if the RTSP server answered with 401/403 (credentials required) —
+    distinct from a timeout/refused connection, which means it's just not there."""
+    status, _data = _rtsp_describe(ip, port, timeout)
+    return status in (401, 403)
 
 
 class AudioProbeTask(QRunnable):
@@ -181,4 +204,20 @@ class AudioProbeTask(QRunnable):
     def run(self):
         result = _probe_audio(self._ip, self._port)
         self.signals.done.emit(self._ip, self._port, result or 'V')
+
+
+class AuthProbeTask(QRunnable):
+    class Signals(QObject):
+        done = pyqtSignal(str, int, bool)   # ip, port, needs_auth
+
+    def __init__(self, ip, port):
+        super().__init__()
+        self.signals = self.Signals()
+        self._ip = ip
+        self._port = port
+        self.setAutoDelete(True)
+
+    def run(self):
+        result = probe_needs_auth(self._ip, self._port)
+        self.signals.done.emit(self._ip, self._port, result)
 

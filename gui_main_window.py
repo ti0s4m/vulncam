@@ -35,7 +35,7 @@ from gui_constants import (
     THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR,
 )
 from gui_mosaic import MosaicGrid
-from gui_thumbnails import ThumbnailManager, AudioProbeTask
+from gui_thumbnails import ThumbnailManager, AudioProbeTask, AuthProbeTask
 from gui_worker import VulnCamWorker
 
 
@@ -90,6 +90,7 @@ class VulnCamWindow(QMainWindow):
         self._stream_items = {}    # (ip, port) → QListWidgetItem
         self._mosaic_cells = {}    # (ip, port) → MosaicCell
         self._audio_probes  = {}   # (ip, port) → AudioProbeTask.Signals
+        self._auth_probes   = {}   # (ip, port) → AuthProbeTask.Signals
         self._worker_refs   = []   # keep-alive: holds Python refs to workers until finished
         self._live_mpv_pids = set()
         self._live_mpv_timer = QTimer(self)
@@ -132,6 +133,7 @@ class VulnCamWindow(QMainWindow):
         self._thumb_manager.stop()
         QThreadPool.globalInstance().waitForDone(4000)
         self._audio_probes.clear()
+        self._auth_probes.clear()
         shutil.rmtree(self._temp_dir, ignore_errors=True)
         super().closeEvent(event)
 
@@ -417,6 +419,7 @@ class VulnCamWindow(QMainWindow):
         self._filter_combo.addItem('', 'working_av')
         self._filter_combo.addItem('', 'recording')
         self._filter_combo.addItem('', 'failed')
+        self._filter_combo.addItem('', 'auth')
         self._filter_combo.addItem('', 'launching')
         self._filter_combo.setCurrentIndex(1)
         self._filter_combo.currentIndexChanged.connect(self._apply_filter)
@@ -541,7 +544,8 @@ class VulnCamWindow(QMainWindow):
         self._filter_combo.setItemText(2, t['filter_working_av'])
         self._filter_combo.setItemText(3, t['filter_recording'])
         self._filter_combo.setItemText(4, t['filter_failed'])
-        self._filter_combo.setItemText(5, t['filter_launching'])
+        self._filter_combo.setItemText(5, t['filter_auth'])
+        self._filter_combo.setItemText(6, t['filter_launching'])
         self._discard_check.setText(t['check_discard'])
         self._clear_btn.setText(t['btn_clear_streams'])
         self._clear_failed_btn.setText(t['btn_clear_failed'])
@@ -845,6 +849,8 @@ class VulnCamWindow(QMainWindow):
             # made after the probe can still fail and must flip the cell back to
             # 'failed' — otherwise it stays gate-open for future connect attempts).
             cell.set_status(status)
+            if status != 'failed':
+                cell.set_auth_failed(False)   # stale AUTH tag until re-confirmed
             if not cell.has_thumbnail():
                 if status == 'failed' and self._running_source is None:
                     # Worker reported failure → retry via ThumbnailManager
@@ -853,8 +859,11 @@ class VulnCamWindow(QMainWindow):
                     # Stream confirmed working with no active run (e.g. double-click) →
                     # now safe to capture thumbnail (no competing MPV window process)
                     self._queue_thumbnail(ip, port)
+            self._refresh_stream_badge(key)
         if status == 'working':
             self._launch_audio_probe(ip, port)
+        elif status == 'failed':
+            self._launch_auth_probe(ip, port)
         self._refresh_connect_buttons()
 
     def _launch_audio_probe(self, ip, port):
@@ -865,6 +874,30 @@ class VulnCamWindow(QMainWindow):
         task.signals.done.connect(self._on_audio_probe_done)
         self._audio_probes[key] = task.signals   # keep Signals alive until done
         QThreadPool.globalInstance().start(task)
+
+    def _launch_auth_probe(self, ip, port):
+        key = (ip, port)
+        if key in self._auth_probes:
+            return
+        task = AuthProbeTask(ip, port)
+        task.signals.done.connect(self._on_auth_probe_done)
+        self._auth_probes[key] = task.signals   # keep Signals alive until done
+        QThreadPool.globalInstance().start(task)
+
+    @pyqtSlot(str, int, bool)
+    def _on_auth_probe_done(self, ip, port, needs_auth):
+        key = (ip, port)
+        self._auth_probes.pop(key, None)
+        cell = self._mosaic_cells.get(key)
+        # Skip only if it's since been confirmed working — _retry_or_fail_thumbnail
+        # briefly flips a thumbnail-less failure to 'launching' while it retries via
+        # ThumbnailManager, and that transient state shouldn't drop this result;
+        # _on_stream_status already clears the tag the moment 'working' lands.
+        if cell and cell.status() != 'working':
+            cell.set_auth_failed(needs_auth)
+            self._refresh_stream_badge(key)
+            if self._filter_combo.currentData() == 'auth':
+                self._apply_filter()
 
     @pyqtSlot(str, int, str)
     def _on_audio_probe_done(self, ip, port, result):
@@ -1151,6 +1184,9 @@ class VulnCamWindow(QMainWindow):
             elif fval == 'recording':
                 session = self._stream_sessions.get(key) if key else None
                 hidden = not (session and session['record_path'])
+            elif fval == 'auth':
+                cell = self._mosaic_cells.get(key) if key else None
+                hidden = not (cell and cell.is_auth_failed())
             else:
                 hidden = bool(target and item.foreground().color() != target)
             item.setHidden(hidden)
@@ -1167,6 +1203,7 @@ class VulnCamWindow(QMainWindow):
     def _remove_stream(self, key, item):
         """Remove a stream from list, mosaic and stream_items dict."""
         self._audio_probes.pop(key, None)
+        self._auth_probes.pop(key, None)
         self._streams_list.takeItem(self._streams_list.row(item))
         del self._stream_items[key]
         if key in self._mosaic_cells:
@@ -1385,18 +1422,24 @@ class VulnCamWindow(QMainWindow):
             except OSError:
                 return base   # file not written yet
             return f'{base} {size}'
+        cell = self._mosaic_cells.get(key)
+        if cell and cell.is_auth_failed():
+            return 'AUTH'
         if self._recordings_for(key):
             return 'SAVED'
         return None
 
     def _session_badge_color(self, key):
         """Mosaic-only badge color: green while just watching, red the moment
-        recording is involved (headless or play+record), neutral for a saved-but-
+        recording (or an auth failure) is involved, neutral for a saved-but-
         inactive recording."""
         session = self._stream_sessions.get(key)
         if session:
             return COLOR_FAILED if (session['headless'] or session['record_path']) \
                 else COLOR_WORKING
+        cell = self._mosaic_cells.get(key)
+        if cell and cell.is_auth_failed():
+            return COLOR_FAILED
         if self._recordings_for(key):
             return COLOR_SAVED
         return None

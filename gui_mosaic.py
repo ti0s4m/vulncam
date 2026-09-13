@@ -30,6 +30,7 @@ class MosaicCell(QFrame):
         self._waiting_text = waiting_text
         self._working_text = working_text
         self._status = 'launching'
+        self._auth_failed = False
         self._has_thumbnail = False
         self._source_pixmap = None
         self._thumb_retries = 0
@@ -224,6 +225,7 @@ class MosaicCell(QFrame):
             self._source_pixmap = None
         self._thumb_retries = 0
         self._status = 'launching'
+        self._auth_failed = False
         self._audio_badge.setVisible(False)
         self._session_badge.setVisible(False)
         self._refresh()
@@ -236,6 +238,12 @@ class MosaicCell(QFrame):
 
     def status(self):
         return self._status
+
+    def set_auth_failed(self, needs_auth):
+        self._auth_failed = bool(needs_auth)
+
+    def is_auth_failed(self):
+        return self._auth_failed
 
     def has_thumbnail(self):
         return self._has_thumbnail
