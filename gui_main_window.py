@@ -981,6 +981,7 @@ class VulnCamWindow(QMainWindow):
         act_stop_record.setEnabled(bool(recording))
         menu.addSeparator()
         act_copy = menu.addAction(self._t('ctx_copy_rtsp'))
+        act_copy_host = menu.addAction(self._t('ctx_copy_host'))
 
         # Recordings submenu: about the single stream that was right-clicked, not
         # the whole multi-selection — opening/browsing recordings isn't a bulk action.
@@ -1021,6 +1022,8 @@ class VulnCamWindow(QMainWindow):
             self._stop_targets(recording)
         elif chosen is act_copy:
             self._copy_rtsp_links(targets)
+        elif chosen is act_copy_host:
+            self._copy_hosts(targets)
         elif chosen is act_delete:
             self._delete_targets(targets)
 
@@ -1072,6 +1075,11 @@ class VulnCamWindow(QMainWindow):
         urls = [f'rtsp://{ip}:{port}' for ip, port in keys]
         QApplication.clipboard().setText('\n'.join(urls))
         self._append_log(self._t('log_rtsp_copied').format(', '.join(urls)))
+
+    def _copy_hosts(self, keys):
+        hosts = [ip for ip, _port in keys]
+        QApplication.clipboard().setText('\n'.join(hosts))
+        self._append_log(self._t('log_host_copied').format(', '.join(hosts)))
 
     def _delete_targets(self, keys):
         for key in keys:
