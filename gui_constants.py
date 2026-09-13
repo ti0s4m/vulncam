@@ -5,6 +5,7 @@ COLOR_IDLE      = QColor('#707070')
 COLOR_LAUNCHING = QColor('#E8A020')
 COLOR_WORKING   = QColor('#20A050')
 COLOR_FAILED    = QColor('#C03030')
+COLOR_SAVED     = QColor('#FFFFFF')
 
 THUMB_SIZES = [
     ('small',  160,  90),

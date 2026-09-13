@@ -31,7 +31,7 @@ from vulncam import (
 )
 from gui_i18n import TRANSLATIONS
 from gui_constants import (
-    COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED,
+    COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, COLOR_SAVED,
     THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR,
 )
 from gui_mosaic import MosaicGrid
@@ -1390,7 +1390,7 @@ class VulnCamWindow(QMainWindow):
             return COLOR_FAILED if (session['headless'] or session['record_path']) \
                 else COLOR_WORKING
         if self._recordings_for(key):
-            return COLOR_IDLE
+            return COLOR_SAVED
         return None
 
     def _refresh_stream_badge(self, key):

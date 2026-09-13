@@ -49,7 +49,7 @@ class MosaicCell(QFrame):
         layout.addWidget(self._img_lbl)
         self._audio_badge = QLabel(self._img_lbl)
         self._audio_badge.setStyleSheet(
-            'background: rgba(0,0,0,170); color: #ffffff;'
+            'background: #000000; color: #ffffff;'
             ' padding: 1px 4px; border-radius: 3px;'
             ' font-size: 9px; font-weight: bold;')
         self._audio_badge.setAttribute(
@@ -185,7 +185,7 @@ class MosaicCell(QFrame):
             return
         badge_color = (color or COLOR_IDLE).name()
         self._session_badge.setStyleSheet(
-            f'background: rgba(0,0,0,170); color: {badge_color};'
+            f'background: #000000; color: {badge_color};'
             ' padding: 1px 4px; border-radius: 3px;'
             ' font-size: 9px; font-weight: bold;')
         self._session_badge.setText(text)
