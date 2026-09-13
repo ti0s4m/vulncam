@@ -121,6 +121,8 @@ TRANSLATIONS = {
         'btn_close':             'Close',
         'log_credentials_saved':  'Connected with the given credentials; they will be reused for {}',
         'log_credentials_failed': 'Connection failed with the given credentials: {}',
+        'ctx_live_view':    'View live',
+        'log_live_started': 'Live view started: {}',
     },
     'es': {
         'window_title':       'VulnCam',
@@ -242,5 +244,7 @@ TRANSLATIONS = {
         'btn_close':             'Cerrar',
         'log_credentials_saved':  'Conectado con las credenciales indicadas; se reutilizarán para {}',
         'log_credentials_failed': 'Conexión fallida con las credenciales indicadas: {}',
+        'ctx_live_view':    'Ver en directo',
+        'log_live_started': 'Vista en directo iniciada: {}',
     },
 }

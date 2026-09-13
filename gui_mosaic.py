@@ -61,6 +61,12 @@ class MosaicCell(QFrame):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._session_badge.setVisible(False)
         self._session_badge.move(4, 4)   # top-left; audio badge owns bottom-right
+        self._live_widget = QWidget(self._img_lbl)
+        self._live_widget.setFixedSize(thumb_w, thumb_h)
+        self._live_widget.move(0, 0)
+        self._live_widget.setStyleSheet('background-color: black;')
+        self._live_widget.setVisible(False)
+        self._live_mode = False
         self._title_lbl = QLabel()
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title_lbl.setWordWrap(True)
@@ -200,6 +206,7 @@ class MosaicCell(QFrame):
         self._thumb_h = h
         self.setFixedWidth(w + 20)
         self._img_lbl.setFixedSize(w, h)
+        self._live_widget.setFixedSize(w, h)
         if self._audio_badge.isVisible():
             self._reposition_badge()
         if self._has_thumbnail:
@@ -228,6 +235,7 @@ class MosaicCell(QFrame):
         self._auth_failed = False
         self._audio_badge.setVisible(False)
         self._session_badge.setVisible(False)
+        self.set_live_mode(False)
         self._refresh()
 
     def audio_type(self):
@@ -247,6 +255,22 @@ class MosaicCell(QFrame):
 
     def has_thumbnail(self):
         return self._has_thumbnail
+
+    def live_video_widget(self):
+        """QWidget destination for embedded playback (mpv --wid). Calling
+        .winId() on the returned widget forces it to become a native window."""
+        return self._live_widget
+
+    def set_live_mode(self, active):
+        self._live_mode = bool(active)
+        self._live_widget.setVisible(self._live_mode)
+        if self._live_mode:
+            self._live_widget.raise_()
+            self._audio_badge.raise_()
+            self._session_badge.raise_()
+
+    def is_live_mode(self):
+        return self._live_mode
 
     def retranslate(self, connect_text, no_signal_text, waiting_text, working_text):
         self._connect_text = connect_text

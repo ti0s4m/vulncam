@@ -121,11 +121,13 @@ class VulnCamWindow(QMainWindow):
                 w.stop()
                 w.wait(3000)
         self._worker_refs.clear()
-        # Headless recordings have no window, so leaving them running would orphan
-        # them invisibly; a live-window session is left alone, same as any other
-        # mpv window the user opened by double-click.
+        # Headless recordings and embedded live views have no independent window to
+        # survive the app closing — the embedded case lives inside a widget that's
+        # about to be destroyed — so leaving them running would orphan them
+        # invisibly; a live-window session is left alone, same as any other mpv
+        # window the user opened by double-click.
         for key, session in list(self._stream_sessions.items()):
-            if session['headless']:
+            if session['headless'] or session.get('embedded'):
                 try:
                     psutil.Process(session['pid']).kill()
                 except Exception:
@@ -1039,6 +1041,9 @@ class VulnCamWindow(QMainWindow):
         act_credentials.setEnabled(bool(cell and cell.is_auth_failed()))
         act_info = menu.addAction(self._t('ctx_info'))
         act_info.setEnabled(key in self._rtsp_info)
+        act_live_view = menu.addAction(self._t('ctx_live_view'))
+        act_live_view.setEnabled(
+            self._mosaic_radio.isChecked() and cell is not None and self._can_connect(key))
 
         # Recordings submenu: about the single stream that was right-clicked, not
         # the whole multi-selection — opening/browsing recordings isn't a bulk action.
@@ -1087,6 +1092,8 @@ class VulnCamWindow(QMainWindow):
             self._on_enter_credentials(key, self._target_title(key))
         elif chosen is act_info:
             self._show_info_dialog(self._target_title(key), self._rtsp_info.get(key, ''))
+        elif chosen is act_live_view:
+            self._start_live_embed(key, self._target_title(key))
 
     def _prompt_credentials(self, title):
         """Modal dialog asking for username/password. Returns (user, pass) or
@@ -1179,6 +1186,44 @@ class VulnCamWindow(QMainWindow):
             return
         self._mark_session(key, proc.pid, headless=True, record_path=record_path)
         self._append_log(self._t('log_recording_started').format(title))
+
+    def _start_live_embed(self, key, title):
+        """Play a stream live inside its own mosaic cell (mpv --wid) instead of a
+        separate window. No window-appearance watch is needed here (unlike
+        _connect_stream) — the session is marked immediately after Popen succeeds,
+        same as _start_headless_recording; if mpv dies early (bad credentials,
+        connection refused), _poll_live_mpv's existing dead-pid sweep notices within
+        a second and reverts the cell to thumbnail mode via _end_session."""
+        if key in self._stream_sessions:
+            self._append_log(self._t('log_already_playing').format(title))
+            return
+        ip, port = key
+        mpv_path = self.mpv_path.text().strip()
+        if not mpv_path:
+            QMessageBox.warning(self, self._t('dlg_mpv_err_title'),
+                                self._t('dlg_mpv_no_path'))
+            return
+        cell = self._mosaic_cells.get(key)
+        if not cell:
+            return
+        cell.set_live_mode(True)
+        wid = int(cell.live_video_widget().winId())
+        url = build_rtsp_url(ip, port, *self._credentials.get(key, (None, None)))
+        cmd = [mpv_path, f'--wid={wid}', url, '--mute=yes',
+               '--no-osc', '--osd-level=0', '--cursor-autohide=always',
+               '--force-window=immediate']
+        if sys.platform == 'linux':
+            cmd.append('--gpu-context=x11egl')
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.STDOUT)
+        except Exception as e:
+            cell.set_live_mode(False)
+            QMessageBox.critical(self, self._t('dlg_mpv_err_title'),
+                                 self._t('dlg_mpv_err_msg').format(e))
+            return
+        self._mark_session(key, proc.pid, embedded=True)
+        self._append_log(self._t('log_live_started').format(title))
 
     def _stop_targets(self, keys):
         for key in keys:
@@ -1282,6 +1327,15 @@ class VulnCamWindow(QMainWindow):
 
     def _remove_stream(self, key, item):
         """Remove a stream from list, mosaic and stream_items dict."""
+        session = self._stream_sessions.get(key)
+        if session and session.get('embedded'):
+            # The mpv process renders into the cell's widget — kill it before
+            # destroying that widget, or it's left holding an invalid window handle.
+            try:
+                psutil.Process(session['pid']).kill()
+            except Exception:
+                pass
+            self._stream_sessions.pop(key, None)
         self._audio_probes.pop(key, None)
         self._auth_probes.pop(key, None)
         self._streams_list.takeItem(self._streams_list.row(item))
@@ -1472,9 +1526,10 @@ class VulnCamWindow(QMainWindow):
 
     # ── Per-stream session tracking (currently playing / recording) ────────────
 
-    def _mark_session(self, key, pid, headless=False, record_path=None):
+    def _mark_session(self, key, pid, headless=False, record_path=None, embedded=False):
         self._stream_sessions[key] = {
             'pid': pid, 'headless': headless, 'record_path': record_path,
+            'embedded': embedded,
         }
         self._live_mpv_timer.start()
         self._refresh_connect_buttons()
@@ -1483,7 +1538,11 @@ class VulnCamWindow(QMainWindow):
             self._apply_filter()
 
     def _end_session(self, key):
-        self._stream_sessions.pop(key, None)
+        session = self._stream_sessions.pop(key, None)
+        if session and session.get('embedded'):
+            cell = self._mosaic_cells.get(key)
+            if cell:
+                cell.set_live_mode(False)
         self._refresh_connect_buttons()
         self._refresh_stream_badge(key)
         if self._filter_combo.currentData() == 'recording':
@@ -1497,7 +1556,7 @@ class VulnCamWindow(QMainWindow):
         session = self._stream_sessions.get(key)
         if session:
             if not session['record_path']:
-                return 'PLAY'
+                return 'LIVE' if session.get('embedded') else 'PLAY'
             base = 'REC' if session['headless'] else 'PLAY·REC'
             try:
                 size = self._format_size(os.path.getsize(session['record_path']))
