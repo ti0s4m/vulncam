@@ -17,14 +17,18 @@ def _qt_message_handler(mode, context, message):
 
 def main():
     import base64
+    import os
+    import tempfile
     from PyQt6.QtCore import qInstallMessageHandler
     import traceback
+
+    crash_log = os.path.join(tempfile.gettempdir(), 'vulncam_crash.log')
 
     def _excepthook(exc_type, exc_value, exc_tb):
         msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
         print(msg, file=sys.stderr)
         try:
-            with open('/tmp/vulncam_crash.log', 'a') as f:
+            with open(crash_log, 'a') as f:
                 f.write(msg + '\n')
         except Exception:
             pass
