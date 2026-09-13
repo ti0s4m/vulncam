@@ -1022,6 +1022,8 @@ class VulnCamWindow(QMainWindow):
         act_connect.setEnabled(bool(connectable))
         act_record = menu.addAction(self._t('ctx_connect_record'))
         act_record.setEnabled(bool(connectable))
+        act_live_view = menu.addAction(self._t('ctx_live_view'))
+        act_live_view.setEnabled(self._mosaic_radio.isChecked() and bool(connectable))
         act_stop_playback = menu.addAction(self._t('ctx_stop_playback'))
         act_stop_playback.setEnabled(bool(playing))
         menu.addSeparator()
@@ -1041,9 +1043,6 @@ class VulnCamWindow(QMainWindow):
         act_credentials.setEnabled(bool(cell and cell.is_auth_failed()))
         act_info = menu.addAction(self._t('ctx_info'))
         act_info.setEnabled(key in self._rtsp_info)
-        act_live_view = menu.addAction(self._t('ctx_live_view'))
-        act_live_view.setEnabled(
-            self._mosaic_radio.isChecked() and cell is not None and self._can_connect(key))
 
         # Recordings submenu: about the single stream that was right-clicked, not
         # the whole multi-selection — opening/browsing recordings isn't a bulk action.
@@ -1076,6 +1075,8 @@ class VulnCamWindow(QMainWindow):
             self._connect_targets(connectable)
         elif chosen is act_record:
             self._connect_targets(connectable, force_record=True)
+        elif chosen is act_live_view:
+            self._start_live_targets(connectable)
         elif chosen is act_stop_playback:
             self._stop_targets(playing)
         elif chosen is act_start_headless:
@@ -1092,8 +1093,6 @@ class VulnCamWindow(QMainWindow):
             self._on_enter_credentials(key, self._target_title(key))
         elif chosen is act_info:
             self._show_info_dialog(self._target_title(key), self._rtsp_info.get(key, ''))
-        elif chosen is act_live_view:
-            self._start_live_embed(key, self._target_title(key))
 
     def _prompt_credentials(self, title):
         """Modal dialog asking for username/password. Returns (user, pass) or
@@ -1159,6 +1158,10 @@ class VulnCamWindow(QMainWindow):
         for key in keys:
             self._start_headless_recording(key, self._target_title(key))
 
+    def _start_live_targets(self, keys):
+        for key in keys:
+            self._start_live_embed(key, self._target_title(key))
+
     def _start_headless_recording(self, key, title):
         """Record a stream to disk without opening any window (mpv --vo=null
         --force-window=no) — a separate mpv process from live playback, so it can
@@ -1209,9 +1212,15 @@ class VulnCamWindow(QMainWindow):
         cell.set_live_mode(True)
         wid = int(cell.live_video_widget().winId())
         url = build_rtsp_url(ip, port, *self._credentials.get(key, (None, None)))
+        # --input-cursor=no stops mpv from grabbing pointer input on its embedded
+        # window at all, so clicks propagate to the cell instead of being swallowed
+        # by mpv (needed for selecting/right-clicking a cell while it's live);
+        # --input-vo-keyboard=no/--no-input-default-bindings do the same for the
+        # keyboard, since this is meant to be a passive preview tile, not a player.
         cmd = [mpv_path, f'--wid={wid}', url, '--mute=yes',
                '--no-osc', '--osd-level=0', '--cursor-autohide=always',
-               '--force-window=immediate']
+               '--force-window=immediate', '--input-cursor=no',
+               '--input-vo-keyboard=no', '--no-input-default-bindings']
         if sys.platform == 'linux':
             cmd.append('--gpu-context=x11egl')
         try:

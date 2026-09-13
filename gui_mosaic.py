@@ -13,6 +13,25 @@ from gui_constants import (
 
 # ── Mosaic view ───────────────────────────────────────────────────────────────
 
+class _LiveVideoWidget(QWidget):
+    """Container mpv renders into via --wid. Calling .winId() on it turns it
+    into a real native child window, which — unlike an ordinary (alien) child
+    widget — doesn't bubble unhandled mouse events up to its Qt parent on its
+    own; forward them to the owning cell explicitly so a live cell can still
+    be selected/right-clicked (mpv itself is told not to grab the pointer via
+    --input-cursor=no, so clicks reach this widget at all)."""
+
+    def __init__(self, cell, parent=None):
+        super().__init__(parent)
+        self._cell = cell
+
+    def mousePressEvent(self, event):
+        self._cell.mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        self._cell.mouseDoubleClickEvent(event)
+
+
 class MosaicCell(QFrame):
     double_clicked = pyqtSignal(str, int, str)   # ip, port, title
     clicked        = pyqtSignal(str, int)         # ip, port
@@ -61,7 +80,7 @@ class MosaicCell(QFrame):
             Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self._session_badge.setVisible(False)
         self._session_badge.move(4, 4)   # top-left; audio badge owns bottom-right
-        self._live_widget = QWidget(self._img_lbl)
+        self._live_widget = _LiveVideoWidget(self, self._img_lbl)
         self._live_widget.setFixedSize(thumb_w, thumb_h)
         self._live_widget.move(0, 0)
         self._live_widget.setStyleSheet('background-color: black;')
