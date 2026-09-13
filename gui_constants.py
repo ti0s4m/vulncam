@@ -14,6 +14,6 @@ THUMB_SIZES = [
 ]
 THUMB_W, THUMB_H = THUMB_SIZES[1][1:]   # 16:9 medium (default)
 MAX_THUMB_RETRIES = 2
-MAX_LIVE_EMBEDS = 4   # hard cap on simultaneous mosaic live views (GPU/X11 contention)
+DEFAULT_MAX_LIVE_EMBEDS = 8   # default cap on simultaneous mosaic live views; user-tunable
 
 RECORDINGS_DIR = 'recordings'   # per-stream subfolders live under this, relative to cwd

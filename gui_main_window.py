@@ -32,7 +32,7 @@ from vulncam import (
 from gui_i18n import TRANSLATIONS
 from gui_constants import (
     COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, COLOR_SAVED,
-    THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR, MAX_LIVE_EMBEDS,
+    THUMB_SIZES, MAX_THUMB_RETRIES, RECORDINGS_DIR, DEFAULT_MAX_LIVE_EMBEDS,
 )
 from gui_mosaic import MosaicGrid
 from gui_thumbnails import ThumbnailManager, AudioProbeTask, AuthProbeTask, build_rtsp_url
@@ -265,6 +265,13 @@ class VulnCamWindow(QMainWindow):
         self._thumb_timeout_spin.setRange(5, 60)
         self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
         pb_num_row.addWidget(self._thumb_timeout_spin)
+        pb_num_row.addSpacing(16)
+        self._label_max_live = QLabel()
+        pb_num_row.addWidget(self._label_max_live)
+        self.max_live_spin = QSpinBox()
+        self.max_live_spin.setRange(1, 20)
+        self.max_live_spin.setValue(DEFAULT_MAX_LIVE_EMBEDS)
+        pb_num_row.addWidget(self.max_live_spin)
         pb_num_row.addStretch()
         self._stats_label = QLabel()
         pb_num_row.addWidget(self._stats_label)
@@ -524,6 +531,7 @@ class VulnCamWindow(QMainWindow):
         self._playback_group.setTitle(t['group_playback'])
         self._label_max_proc.setText(t['label_max_proc'])
         self._label_thumb_timeout.setText(t['label_thumb_timeout'])
+        self._label_max_live.setText(t['label_max_live'])
         self._dedup_check.setText(t['check_dedup'])
         self._search_group.setTitle(t['group_search'])
         self._label_query.setText(t['label_query'])
@@ -721,6 +729,7 @@ class VulnCamWindow(QMainWindow):
         self.allres_check.setChecked(False)
         self._dedup_check.setChecked(True)
         self._thumb_timeout_spin.setValue(DEFAULT_TIMEOUT)
+        self.max_live_spin.setValue(DEFAULT_MAX_LIVE_EMBEDS)
         self._discard_check.setChecked(False)
         self._filter_combo.setCurrentIndex(1)
         self._autofill_mpv_if_empty()
@@ -1025,7 +1034,7 @@ class VulnCamWindow(QMainWindow):
         act_record.setEnabled(bool(connectable))
         act_live_view = menu.addAction(self._t('ctx_live_view'))
         act_live_view.setEnabled(self._mosaic_radio.isChecked() and bool(connectable)
-                                 and len(live_keys) < MAX_LIVE_EMBEDS)
+                                 and len(live_keys) < self.max_live_spin.value())
         act_stop_playback = menu.addAction(self._t('ctx_stop_playback'))
         act_stop_playback.setEnabled(bool(playing))
         act_stop_all_live = menu.addAction(self._t('ctx_stop_all_live'))
@@ -1206,9 +1215,10 @@ class VulnCamWindow(QMainWindow):
         if key in self._stream_sessions:
             self._append_log(self._t('log_already_playing').format(title))
             return
+        max_live = self.max_live_spin.value()
         active_live = sum(1 for s in self._stream_sessions.values() if s.get('embedded'))
-        if active_live >= MAX_LIVE_EMBEDS:
-            self._append_log(self._t('log_live_limit').format(MAX_LIVE_EMBEDS))
+        if active_live >= max_live:
+            self._append_log(self._t('log_live_limit').format(max_live))
             return
         ip, port = key
         mpv_path = self.mpv_path.text().strip()

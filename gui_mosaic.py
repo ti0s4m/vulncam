@@ -4,8 +4,8 @@ import sys
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel, QFrame, QScrollArea, QGridLayout,
 )
-from PyQt6.QtCore import Qt, QTimer, QPoint, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter
+from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, pyqtSignal
+from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter, QPen
 
 from gui_constants import (
     COLOR_IDLE, COLOR_LAUNCHING, COLOR_WORKING, COLOR_FAILED, THUMB_W, THUMB_H,
@@ -59,7 +59,9 @@ class MosaicCell(QFrame):
         self._thumb_w = thumb_w
         self._thumb_h = thumb_h
         self.setFixedWidth(thumb_w + 20)
-        self.setFrameShape(QFrame.Shape.Box)
+        # Border/background are hand-painted (see paintEvent) rather than drawn via
+        # setFrameShape()/setStyleSheet() — see _refresh()'s comment for why.
+        self.setFrameShape(QFrame.Shape.NoFrame)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
@@ -90,6 +92,7 @@ class MosaicCell(QFrame):
         self._title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title_lbl.setWordWrap(True)
         self._title_lbl.setFont(QFont('Monospace', 7))
+        self._title_lbl.setStyleSheet('color: #dddddd; border: none;')
         layout.addWidget(self._title_lbl)
         self._update_label(title)
         self._refresh()
@@ -127,23 +130,36 @@ class MosaicCell(QFrame):
             else:
                 self._img_lbl.setPixmap(
                     self._make_placeholder(self._no_signal_text, COLOR_FAILED))
-        if self._live_mode:
-            # A live cell has a real native child window inside _img_lbl (see
-            # live_video_widget()); setStyleSheet() below forces Qt to resync that
-            # native window's clipping/stacking on every call, which is cheap for an
-            # ordinary (alien) widget but expensive enough under X11 that toggling
-            # selection on several live cells in a row can make the whole app feel
-            # frozen. Skip it while live — set_live_mode() re-syncs once on exit.
-            return
+        # Border/background are repainted via update() -> paintEvent() rather than
+        # setStyleSheet(): a live cell has a real native child window inside
+        # _img_lbl (see live_video_widget()), and setStyleSheet() forces Qt to
+        # resync that native window's clipping/stacking on every call — cheap for
+        # an ordinary (alien) widget, but expensive enough under X11 that toggling
+        # selection on several live cells in a row made the whole app feel frozen.
+        # A plain repaint doesn't touch the native window at all, live or not.
+        self.update()
+
+    def _border_style(self):
+        """(background, border_color, border_width) for the current status/
+        selection state — kept separate from paintEvent() so it can be checked
+        without actually rendering anything."""
         c = {'waiting': '#404040', 'launching': COLOR_LAUNCHING.name(),
              'working': COLOR_WORKING.name(), 'failed': COLOR_FAILED.name()}
-        col = c.get(self._status, COLOR_LAUNCHING.name())
-        bg = '#1e2a38' if self._selected else '#0d0d0d'
-        border = '3px solid #ffffff' if self._selected else f'2px solid {col}'
-        self.setStyleSheet(
-            f'MosaicCell {{ border: {border}; border-radius: 4px;'
-            f' background: {bg}; }}'
-            f'QLabel {{ border: none; color: #dddddd; }}')
+        col = QColor(c.get(self._status, COLOR_LAUNCHING.name()))
+        bg = QColor('#1e2a38') if self._selected else QColor('#0d0d0d')
+        border_color = QColor('#ffffff') if self._selected else col
+        border_width = 3 if self._selected else 2
+        return bg, border_color, border_width
+
+    def paintEvent(self, event):
+        bg, border_color, border_width = self._border_style()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        half = border_width / 2
+        rect = QRectF(self.rect()).adjusted(half, half, -half, -half)
+        painter.setPen(QPen(border_color, border_width))
+        painter.setBrush(bg)
+        painter.drawRoundedRect(rect, 4, 4)
 
     def set_selected(self, selected):
         self._selected = selected
