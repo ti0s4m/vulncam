@@ -1218,6 +1218,14 @@ class VulnCamWindow(QMainWindow):
         if key in self._stream_sessions:
             self._append_log(self._t('log_already_playing').format(title))
             return
+        if QApplication.platformName() == 'wayland':
+            # No XWayland available to embed through (see gui.py's
+            # _force_xcb_under_wayland) — winId() can't produce a window mpv is
+            # able to reparent into, so embedding would just spawn a stray
+            # top-level window per cell instead. Fall back to a normal window.
+            self._append_log(self._t('log_live_embed_unsupported').format(title))
+            self._connect_stream(key, title)
+            return
         max_live = self.max_live_spin.value()
         if len(self._live_embed_keys()) >= max_live:
             self._append_log(self._t('log_live_limit').format(max_live))
@@ -1315,7 +1323,7 @@ class VulnCamWindow(QMainWindow):
             if title in list_window_titles():
                 timer.stop()
                 _finish('working')
-            elif time.time() - start >= DEFAULT_TIMEOUT:
+            elif time.time() - start >= self._thumb_timeout_spin.value():
                 timer.stop()
                 try:
                     psutil.Process(pid).kill()

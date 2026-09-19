@@ -3,6 +3,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from random import sample, shuffle
@@ -26,6 +27,7 @@ class GUIVulnCam(VulnCam):
         self._known_pids      = set()
         self.probe             = getattr(args, 'probe', False)
         self.thumb_timeout     = getattr(args, 'thumb_timeout', DEFAULT_TIMEOUT)
+        self.window_timeout    = self.thumb_timeout
         self.shodan_plan       = getattr(args, 'shodan_plan', '')
         self._log_dev_plan_limit = getattr(args, 'log_dev_plan_limit', '')
         self.thumb_base_dir    = None    # set by worker before run()
@@ -51,8 +53,43 @@ class GUIVulnCam(VulnCam):
         return super()._active_processes()
 
     def _on_process_removed(self, info):
+        if info['working']:
+            self._cleanup_log(info)
+        else:
+            self._log_mpv_failure(info, logging.WARNING)
         if not info['working'] and self.on_stream_status:
             self.on_stream_status(info['title'], 'failed')
+
+    @staticmethod
+    def _cleanup_log(info):
+        log_path = info.get('log_path')
+        if log_path:
+            try:
+                os.remove(log_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _log_mpv_failure(info, level=logging.DEBUG):
+        """Surface mpv's own stderr on failure/timeout — otherwise these are
+        silent, which makes platform-specific issues (e.g. a codec/driver error
+        that's far more common on Windows) impossible to diagnose from the GUI
+        log alone."""
+        log_path = info.get('log_path')
+        if not log_path:
+            return
+        try:
+            with open(log_path, 'rb') as f:
+                tail = f.read()[-2000:].decode('utf-8', errors='replace').strip()
+            if tail:
+                _vulncam_logger.log(level, '%s mpv output: %s', info['title'], tail)
+        except OSError:
+            pass
+        finally:
+            try:
+                os.remove(log_path)
+            except OSError:
+                pass
 
     def _check_working(self):
         # Detect new PIDs in both modes
@@ -109,6 +146,7 @@ class GUIVulnCam(VulnCam):
             self.on_window_opened(pid, info['ip'], info['port'], info.get('record_path') or '')
 
     def _on_stream_timeout(self, pid, info):
+        self._log_mpv_failure(info)
         if not info['working'] and self.on_stream_status:
             self.on_stream_status(info['title'], 'failed')
 
@@ -269,9 +307,20 @@ class GUIVulnCam(VulnCam):
             if not self.probe and sys.platform == 'linux':
                 cmd.append('--gpu-context=x11egl')
             popen_env = capture_env() if self.probe else None
-            mpv_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.STDOUT,
-                                        env=popen_env)
+            log_path = None
+            log_fh = subprocess.DEVNULL
+            if not self.probe:
+                # A real file (not a pipe) so a long-lived, mostly-quiet stream can
+                # never block on a full pipe buffer; only read back if it exits
+                # early (see _log_mpv_failure).
+                fd, log_path = tempfile.mkstemp(prefix='vulncam_mpv_', suffix='.log')
+                log_fh = os.fdopen(fd, 'wb')
+            try:
+                mpv_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                            stderr=log_fh, env=popen_env)
+            finally:
+                if log_fh is not subprocess.DEVNULL:
+                    log_fh.close()
             self.processes[mpv_proc.pid] = {
                 'process': mpv_proc,
                 'title': title,
@@ -281,6 +330,7 @@ class GUIVulnCam(VulnCam):
                 'port': match[1],
                 'thumb_dir': thumb_dir,
                 'record_path': record_path,
+                'log_path': log_path,
             }
             time.sleep(0.2)
             self._check_working()  # detect new PID immediately → on_stream_added

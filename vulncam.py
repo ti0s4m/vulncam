@@ -205,7 +205,7 @@ class VulnCam:
                     self._on_stream_working(pid, info)
                 info['working'] = True
                 cnt_working += 1
-            elif (now - info['launch_time']) >= DEFAULT_TIMEOUT:
+            elif (now - info['launch_time']) >= getattr(self, 'window_timeout', DEFAULT_TIMEOUT):
                 logger.debug('Killing %s as it is not working.', title)
                 info['process'].kill()
                 self.processes.pop(pid)
