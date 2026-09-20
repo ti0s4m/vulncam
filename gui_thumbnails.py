@@ -209,6 +209,14 @@ def probe_needs_auth(ip, port, timeout=3):
     return status in (401, 403), data.decode('utf-8', errors='replace')
 
 
+def _emit_probe_result(signals, *args):
+    """Ignore a result that races with Qt/Python application teardown."""
+    try:
+        signals.done.emit(*args)
+    except RuntimeError:
+        pass
+
+
 class AudioProbeTask(QRunnable):
     class Signals(QObject):
         done = pyqtSignal(str, int, str, str)   # ip, port, 'V'|'AV', raw_text
@@ -222,7 +230,8 @@ class AudioProbeTask(QRunnable):
 
     def run(self):
         audio_type, raw_text = _probe_audio(self._ip, self._port)
-        self.signals.done.emit(self._ip, self._port, audio_type or 'V', raw_text)
+        _emit_probe_result(
+            self.signals, self._ip, self._port, audio_type or 'V', raw_text)
 
 
 class AuthProbeTask(QRunnable):
@@ -238,5 +247,6 @@ class AuthProbeTask(QRunnable):
 
     def run(self):
         needs_auth, raw_text = probe_needs_auth(self._ip, self._port)
-        self.signals.done.emit(self._ip, self._port, needs_auth, raw_text)
+        _emit_probe_result(
+            self.signals, self._ip, self._port, needs_auth, raw_text)
 
