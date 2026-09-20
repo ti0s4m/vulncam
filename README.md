@@ -53,7 +53,13 @@ If XWayland is unavailable, VulnCam falls back to a normal mpv window instead of
 
 ## Configuration
 
-Create or edit `config.ini`:
+Copy the example configuration to your local, ignored `config.ini` and fill in your own values:
+
+```bash
+cp config.example.ini config.ini
+```
+
+Then edit `config.ini`:
 
 ```ini
 [REQUIRED]
@@ -71,6 +77,8 @@ MPVFilePath = C:\\Program Files\\mpv\\mpv.exe
 ```
 
 The optional IP geolocation key is used as a fallback when the public `ip-api.com` lookup does not return usable data.
+
+`config.ini` is intentionally ignored by Git. Never commit real API keys or stream credentials; use `config.example.ini` as the shareable template.
 
 ## Installation
 
