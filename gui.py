@@ -36,6 +36,11 @@ from gui_main_window import VulnCamWindow
 
 def _qt_message_handler(mode, context, message):
     """Forward Qt warnings/errors to stderr so they appear in the terminal."""
+    if 'Failed to register with host portal' in message:
+        # Harmless xdg-desktop-portal quirk (D-Bus connection already has an app
+        # ID) seen when running from a terminal instead of a real .desktop
+        # launch; doesn't affect functionality, just noise.
+        return
     levels = {0: 'Qt[Debug]', 1: 'Qt[Warning]', 2: 'Qt[Critical]',
               3: 'Qt[Fatal]', 4: 'Qt[Info]'}
     print(f'{levels.get(mode, "Qt[?]")}: {message}', file=sys.stderr)

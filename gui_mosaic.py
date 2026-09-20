@@ -3,6 +3,7 @@ import sys
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QLabel, QFrame, QScrollArea, QGridLayout,
+    QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRectF, pyqtSignal
 from PyQt6.QtGui import QFont, QColor, QPixmap, QPainter, QPen
@@ -59,6 +60,7 @@ class MosaicCell(QFrame):
         self._thumb_w = thumb_w
         self._thumb_h = thumb_h
         self.setFixedWidth(thumb_w + 20)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         # Border/background are hand-painted (see paintEvent) rather than drawn via
         # setFrameShape()/setStyleSheet() — see _refresh()'s comment for why.
         self.setFrameShape(QFrame.Shape.NoFrame)
